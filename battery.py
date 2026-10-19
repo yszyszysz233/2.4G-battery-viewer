@@ -440,8 +440,9 @@ def _hidpp_feature_index(dev: HidDevice, rid: int, index: int, feature_id: int) 
                         [feature_id >> 8, feature_id & 0xFF])
     if not reply or _hidpp_error(reply) is not None:
         return None
-    # 短报文 / 长报文的返回位置可能不同，逐个试探并验证
-    for pos in (6, 4, 5):
+    # HID++ 2.0 的 getFeature 回复：byte4=feature index，byte5=type，byte6=version。
+    # 之前先试 byte6 会把 version（比如 2）当成索引，查电池必然失败。
+    for pos in (4, 6, 5):
         if len(reply) > pos and reply[pos]:
             return reply[pos]
     return None
@@ -464,6 +465,16 @@ def strategy_logitech_hidpp(iface: HidInterface) -> Optional[BatteryResult]:
         return BatteryResult(ok=False, source="罗技 HID++",
                              detail=f"无法打开厂商接口：{e}")
     return None
+
+
+def _voltage_to_percent(mv: int) -> int:
+    """锂电池电压 → 百分比（3.50V≈0%，4.15V≈100%，线性近似）。
+
+    GPW 这类罗技鼠标只上报电压（0x1001），不直接给百分比；
+    线性近似够用，和 GHUB 的读数差几个点。
+    """
+    pct = (mv - 3500) / (4150 - 3500) * 100.0
+    return max(0, min(100, int(round(pct))))
 
 
 def _logitech_probe_index(dev: HidDevice, iface: HidInterface, rid: int,
@@ -500,12 +511,14 @@ def _logitech_probe_index(dev: HidDevice, iface: HidInterface, rid: int,
     if fidx:
         reply = _hidpp_call(dev, rid, index, fidx, 0x00, [])
         if reply and _hidpp_error(reply) is None and len(reply) >= 6:
-            mv = reply[4] | (reply[5] << 8)
-            if 2000 <= mv <= 5000:
+            # 电压是**大端**：0x0F51 = 3921 mV。按小端读会得到 20751，直接被丢掉。
+            mv = (reply[4] << 8) | reply[5]
+            if 2500 <= mv <= 4500:
+                level = _voltage_to_percent(mv)
                 return BatteryResult(
-                    ok=True, level=None, voltage_mv=mv, status="unknown",
+                    ok=True, level=level, voltage_mv=mv, status="unknown",
                     source="罗技 HID++ 2.0（0x1001 电池电压）",
-                    detail=f"设备索引 {index}：电压 {mv} mV（该机型不直接给百分比）",
+                    detail=f"设备索引 {index}：{mv} mV ≈ {level}%",
                     raw=reply,
                 )
     return None
