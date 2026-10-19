@@ -3,7 +3,7 @@
 
 界面约定
 --------
-* 通知区域显示主页所选设备的电量；空卡片不生成多余图标。
+* 每台设备可独立启用托盘图标，数量不受主页卡片限制。
   图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
 * **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
 * 左键图标 → 立刻刷新一次。
@@ -160,8 +160,8 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
-        self.slots = self.cfg["selected_devices"]
-        self.icons = self.icon_specs(self.slots or [], {})
+        self.tray_keys = self.cfg["tray_devices"]
+        self.icons = self.icon_specs(self.tray_keys or [], {})
         self.levels = {key: (None, "正在读取…") for _, key, _, _ in self.icons}
         self.added_icons = set()
         self.revision = 0
@@ -212,19 +212,17 @@ class TrayApp:
                      if level is not None else f"{title}：{err or '未知'}")[:127]
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
-    def icon_specs(self, slots, devices):
+    def icon_specs(self, keys, devices):
         icons = []
-        for slot, key in enumerate(slots):
-            if not key:
-                continue
+        for position, key in enumerate(dict.fromkeys(key for key in keys if key)):
             title = (devices[key].title if key in devices
                      else self.cfg["device_labels"].get(key, ds.KNOWN.get(key, (key,))[0]))
-            icons.append((slot + 1, key, title, slot == 1))
+            icons.append((position + 1, key, title, position % 2 == 1))
         return icons or [(1, "overview", tc.UI_TITLE, False)]
 
     def add_icons(self) -> None:
         for uid, key, title, plate in self.icons:
-            self.levels.setdefault(key, (None, "请在主页选择设备"))
+            self.levels.setdefault(key, (None, "请在设备与托盘中启用设备"))
             if self._apply_icon(NIM_ADD, uid, key, title, plate):
                 self.added_icons.add(uid)
 
@@ -249,16 +247,16 @@ class TrayApp:
 
     def apply_config(self) -> None:
         new = tc.load_config()
-        changed = new["selected_devices"] != self.slots
+        changed = new["tray_devices"] != self.tray_keys
         timer_changed = any(new[k] != self.cfg[k] for k in ("interval", "auto_refresh"))
         self.cfg = new
         if timer_changed:
             self.apply_timer()
         if changed:
             self.revision += 1
-            self.slots = new["selected_devices"]
+            self.tray_keys = new["tray_devices"]
             self.remove_icons()
-            self.icons = self.icon_specs(self.slots or [], {})
+            self.icons = self.icon_specs(self.tray_keys or [], {})
             self.levels = {key: (None, "正在读取…") for _, key, _, _ in self.icons}
             self.add_icons()
             self.refresh_now()
@@ -275,12 +273,12 @@ class TrayApp:
 
     def _worker(self, hwnd, revision, cfg) -> None:
         try:
-            devices = ds.discover_devices(cfg["device_labels"])
-            slots = ds.selected_devices(cfg, devices)
-            readings = ds.read_selected(slots, devices)
-            self.completed = (revision, slots, devices, readings, "")
+            devices = ds.discover_devices()
+            keys = ds.tray_device_keys(cfg, devices)
+            readings = ds.read_selected(keys, devices, cfg["device_labels"])
+            self.completed = (revision, keys, devices, readings, "")
         except Exception as error:
-            self.completed = (revision, cfg["selected_devices"] or [], {}, {}, str(error))
+            self.completed = (revision, cfg["tray_devices"] or [], {}, {}, str(error))
             self.log("读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
@@ -288,22 +286,23 @@ class TrayApp:
         self.busy = False
         result, self.completed = self.completed, None
         if result and result[0] == self.revision:
-            _, slots, devices, readings, error = result
-            if self.slots is None and not error:
+            _, keys, devices, readings, error = result
+            if self.tray_keys is None and not error:
                 try:
-                    labels = {k: devices[k].title for k in slots if k in devices}
-                    self.cfg = tc.update_config(selected_devices=slots, device_labels=labels)
+                    labels = dict(self.cfg["device_labels"])
+                    labels.update({k: devices[k].title for k in keys if k in devices})
+                    self.cfg = tc.update_config(tray_devices=keys, device_labels=labels)
                 except OSError as save_error:
                     self.log(f"保存设备选择失败：{save_error}")
-            self.slots = slots
-            icons = self.icon_specs(slots, devices)
+            self.tray_keys = keys
+            icons = self.icon_specs(keys, devices)
             changed = icons != self.icons
             if changed:
                 self.remove_icons()
                 self.icons = icons
             self.levels = {
                 key: (readings[key].level, readings[key].error or readings[key].status)
-                if key in readings else (None, error or "请在主页选择设备")
+                if key in readings else (None, error or "请在设备与托盘中启用设备")
                 for _, key, _, _ in self.icons
             }
             if changed:

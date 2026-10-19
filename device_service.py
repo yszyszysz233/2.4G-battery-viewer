@@ -47,7 +47,8 @@ class Reading:
 
 
 KNOWN = {
-    "046d:c547": ("罗技 GPW2", "logitech", "LIGHTSPEED · 2.4 GHz"),
+    "046d:c547": ("罗技 GPW2", "logitech", "GPW2 接收器 · LIGHTSPEED 2.4 GHz"),
+    "046d:c094": ("PRO X Wireless", "unsupported", "GPW2 · USB 有线连接"),
     "320f:5088": ("VGN S99 键盘", "vgn_s99", "2.4 GHz 无线键盘"),
     "3837:6045": ("迈从 X9 耳机", "mchose_x9", "2.4 GHz 无线耳机"),
     "373b:1216": ("ATK / VXE 无线鼠标", "vendor", "2.4 GHz 无线鼠标"),
@@ -55,14 +56,12 @@ KNOWN = {
 }
 
 
-def discover_devices(labels=None):
-    labels = labels or {}
+def discover_devices():
+    """Return the current physical HID inventory, using reported device names."""
     groups = {}
     for interface in hw.enumerate_hid():
         name = interface.product or ""
-        if not interface.vid or "virtual" in name.lower() or not name:
-            continue
-        if "AURA LED" in name:
+        if not interface.vid or "virtual" in name.lower():
             continue
         key = f"{interface.vid:04x}:{interface.pid:04x}"
         groups.setdefault(key, []).append(interface)
@@ -71,7 +70,7 @@ def discover_devices(labels=None):
         title = hw.pick_device_name(interfaces)
         provider, connection = "unsupported", "已发现设备"
         if key in KNOWN:
-            title, provider, connection = KNOWN[key]
+            _, provider, connection = KNOWN[key]
             if provider == "vgn_s99":
                 from vgn_s99 import is_s99
                 if not any(is_s99(interface) for interface in interfaces):
@@ -86,12 +85,11 @@ def discover_devices(labels=None):
                  for s in bt.all_protocols() for d in interfaces):
             provider, connection = "vendor", "2.4 GHz 无线设备"
         devices[key] = Device(key, title, provider, connection, interfaces)
-    for key in set(KNOWN) | set(labels):
-        if key not in devices:
-            title, provider, connection = KNOWN.get(key, (labels.get(key, key), "unsupported", "USB / 2.4G"))
-            devices[key] = Device(key, title, provider, connection)
-    return dict(sorted(devices.items(), key=lambda item: (
-        not item[1].connected, not item[1].supported, item[1].title)))
+    return dict(sorted(devices.items(), key=lambda item: (item[1].title.casefold(), item[0])))
+
+
+def remembered_title(key, labels=None):
+    return (labels or {}).get(key) or KNOWN.get(key, (key,))[0]
 
 
 def selected_devices(cfg, devices):
@@ -113,10 +111,17 @@ def switch_slot(slots, slot, key):
     return result
 
 
+def tray_device_keys(cfg, devices):
+    selected = cfg.get("tray_devices")
+    if selected is None:
+        return [key for key, device in devices.items() if device.connected and device.supported]
+    return list(dict.fromkeys(key for key in selected if key))
+
+
 def read_device(device):
     reading = Reading(device.key, device.title, device.connection)
     if not device.connected:
-        reading.error = "未找到接收器，请连接设备后刷新。"
+        reading.error = "设备未连接，请连接后刷新。"
         return reading
     if not device.supported:
         reading.state = "unsupported"
@@ -171,9 +176,9 @@ def read_device(device):
     return reading
 
 
-def read_selected(slots, devices):
+def read_selected(slots, devices, labels=None):
     readings = {}
     for key in dict.fromkeys(k for k in slots if k):
-        device = devices.get(key, Device(key, key))
+        device = devices.get(key) or Device(key, remembered_title(key, labels))
         readings[key] = read_device(device)
     return readings

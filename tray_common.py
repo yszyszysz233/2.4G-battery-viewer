@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "autostart": False,    # 开机自启只通过用户点击启用
     "auto_refresh": True,
     "selected_devices": None,  # None = 首次启动，按已连接设备初始化
+    "tray_devices": None,      # 独立于主页，数量不限；None = 首次按已连接设备初始化
     "device_labels": {},
 }
 
@@ -79,6 +80,13 @@ def normalize_config(data) -> dict:
         if slots[0] and slots[0] == slots[1]:
             slots[1] = ""
         cfg["selected_devices"] = slots
+    tray = data.get("tray_devices")
+    if isinstance(tray, list):
+        cfg["tray_devices"] = list(dict.fromkeys(
+            key for key in tray if isinstance(key, str) and key and len(key) < 100))
+    elif "tray_devices" not in data and cfg["selected_devices"] is not None:
+        # Preserve the old tray selection once, before the home cards change.
+        cfg["tray_devices"] = [key for key in cfg["selected_devices"] if key]
     labels = data.get("device_labels")
     if isinstance(labels, dict):
         cfg["device_labels"] = {k: v[:100] for k, v in labels.items()
@@ -248,7 +256,7 @@ def set_autostart(enabled: bool) -> bool:
             startup_lnk(), pythonw_path(),
             arguments=f'"{tray_script()}"',
             workdir=BASE_DIR,
-            description="设备电量查看器：在托盘显示主页所选设备的电量")
+            description="设备电量查看器：在托盘显示逐台启用的设备电量")
         _set_startup_approved(True)
     else:
         _clear_startup_approved()
