@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 import hid_win as hw
 import darkrim_proto as drp
+import gm3323d_proto as gm
 from hid_win import HidDevice, HidError, HidInterface, HidP_Feature, HidP_Input
 
 USER_PROTOCOL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -217,6 +218,19 @@ def save_user_protocol(spec: ProtocolSpec) -> None:
 
 def all_protocols() -> list[ProtocolSpec]:
     return BUILTIN_PROTOCOLS + load_user_protocols()
+
+
+# --------------------------------------------------------------------------
+# 策略：GM3323D 只读 Input Report
+# --------------------------------------------------------------------------
+def strategy_gm3323d(iface: HidInterface, timeout: float = 5.0) -> Optional[BatteryResult]:
+    if not gm.matches(iface):
+        return None
+    result = gm.read_battery(iface, timeout=timeout)
+    return BatteryResult(ok=result.ok, level=result.level,
+                         raw_level=result.raw[4] if result.raw else None,
+                         source="GM3323D 只读电量报文", detail=result.detail,
+                         raw=result.raw)
 
 
 # --------------------------------------------------------------------------
@@ -672,6 +686,7 @@ def read_battery(iface: HidInterface, listen_seconds: float = 3.0,
     """按顺序跑所有策略，返回所有尝试记录（第一条 ok=True 的是结论）。"""
     attempts: list[BatteryResult] = []
     steps = [
+        ("GM3323D 只读电量报文", lambda: strategy_gm3323d(iface)),
         ("标准 HID 电量字段", lambda: strategy_standard_battery_usage(iface)),
         ("DARKRIM 私有协议", lambda: strategy_darkrim(iface)),
         ("厂商协议", lambda: strategy_vendor_protocol(iface)),
@@ -686,7 +701,7 @@ def read_battery(iface: HidInterface, listen_seconds: float = 3.0,
             res = BatteryResult(ok=False, source=label, detail=f"异常：{e}")
         if res is not None:
             attempts.append(res)
-            if res.ok:
+            if res.ok or gm.matches(iface):
                 return attempts
 
     if progress:

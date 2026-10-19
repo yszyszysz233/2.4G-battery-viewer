@@ -23,6 +23,7 @@ from typing import Optional
 
 import hid_win as hw
 import battery as bt
+import gm3323d_proto as gm
 import bt_battery as btb
 from hid_win import HidDevice, HidError, HidInterface
 
@@ -48,7 +49,9 @@ def cli_list() -> None:
 
 def cli_battery(listen: float = 3.0) -> None:
     devs = [d for d in hw.enumerate_hid()
-            if d.is_vendor_page or d.num_feature_value_caps or d.num_input_value_caps]
+            if gm.matches(d) or ((d.vid, d.pid) != (gm.VID, gm.PID)
+                                and (d.is_vendor_page or d.num_feature_value_caps
+                                     or d.num_input_value_caps))]
     print(f"检查 {len(devs)} 个候选接口……\n")
     for d in devs:
         attempts = bt.read_battery(d, listen_seconds=listen)
@@ -441,7 +444,9 @@ def build_ui():
                         (0x0001, 0x0005): "手柄", (0x0001, 0x0080): "系统控制",
                         (0x000C, 0x0001): "多媒体键", (0x000D, 0x0005): "精密触摸板",
                     }.get((d.usage_page, d.usage), "")
-                    if d.is_vendor_page:
+                    if gm.matches(d):
+                        label = "GM3323D 电量接口（只读）"
+                    elif d.is_vendor_page:
                         label = "厂商专用接口"
                     elif d.num_feature_value_caps or d.num_input_value_caps:
                         label = label or "含可解析字段"
@@ -616,7 +621,8 @@ def build_ui():
                     0 if (d.num_feature_value_caps or d.num_input_value_caps) else 1,
                     1 if d.reserved else 0)
 
-        ordered = sorted(ifaces, key=rank)
+        gm_ifaces = [d for d in ifaces if gm.matches(d)]
+        ordered = gm_ifaces or sorted(ifaces, key=rank)
 
         def work():
             log: list[str] = []
