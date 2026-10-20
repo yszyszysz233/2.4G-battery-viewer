@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""我的设备电量 —— 只显示 ATK 鼠标 + DARKRIM 耳机的简洁面板
+"""我的设备电量 —— ATK 鼠标 + DARKRIM 耳机（有罗技接收器时再加 G304）
 
 用法：
     python my_devices.py            打开界面（默认自动刷新）
     python my_devices.py --once     命令行读一次就退出
 
-界面只有两块卡片，各显示一个设备的电量，可自动刷新。
+界面显示检测到的设备卡片，可自动刷新。
 底层复用 battery.py / darkrim_proto.py 里已经验证过的协议。
 """
 
@@ -108,8 +108,43 @@ def read_darkrim() -> Reading:
     return r
 
 
-def read_all() -> list[Reading]:
-    return [read_atk(), read_darkrim()]
+def read_g304() -> Reading:
+    """罗技 G304 / G305（LIGHTSPEED 接收器，HID++ 2.0 电池状态）。"""
+    r = Reading("罗技 G304", "LIGHTSPEED 接收器")
+    ifaces = bt.logitech_interfaces()
+    if not ifaces:
+        r.error = "没找到罗技接收器（请把 LIGHTSPEED 接收器插上）"
+        return r
+    r.subtitle = f"{ifaces[0].vid_pid} · LIGHTSPEED Receiver"
+    try:
+        res = bt.read_logitech()
+    except Exception as e:
+        r.error = f"读取出错：{e}"
+        return r
+    if res is None:
+        r.error = "这台设备没有可用的读取方式"
+        return r
+    if res.ok:
+        r.level = res.level
+        r.status = res.status_text
+        r.detail = res.source
+    else:
+        r.error = res.detail or "读取失败（鼠标可能已关机或休眠）"
+    return r
+
+
+def read_all(include_logitech: Optional[bool] = None) -> list[Reading]:
+    """读取所有已接入设备。
+
+    include_logitech 为 None 时自动探测；界面启动后固定传 True/False，
+    避免中途插拔接收器导致卡片数量变化。
+    """
+    if include_logitech is None:
+        include_logitech = bool(bt.logitech_interfaces())
+    readings = [read_atk(), read_darkrim()]
+    if include_logitech:
+        readings.append(read_g304())
+    return readings
 
 
 # ==========================================================================
@@ -202,11 +237,13 @@ def build_ui():
     import tkinter as tk
     from tkinter import ttk
 
+    include_logitech = bool(bt.logitech_interfaces())
+
     root = tk.Tk()
     root.title(tc.UI_TITLE)
     root.configure(bg=BG)
-    root.geometry("680x470")
-    root.minsize(620, 440)
+    root.geometry("940x470" if include_logitech else "680x470")
+    root.minsize(900 if include_logitech else 620, 440)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -266,14 +303,20 @@ def build_ui():
     # ---- 卡片 ----
     body = ttk.Frame(root, padding=(18, 4, 18, 4))
     body.pack(fill="both", expand=True)
-    body.columnconfigure(0, weight=1, uniform="card")
-    body.columnconfigure(1, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
 
-    card_atk = DeviceCard(body, "ATK 鼠标")
-    card_atk.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    card_dr = DeviceCard(body, "DARKRIM 耳机")
-    card_dr.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    device_titles = ["ATK 鼠标", "DARKRIM 耳机"]
+    if include_logitech:
+        device_titles.append("罗技 G304")
+
+    cards: list[DeviceCard] = []
+    for col, title in enumerate(device_titles):
+        body.columnconfigure(col, weight=1, uniform="card")
+        card = DeviceCard(body, title)
+        left = 0 if col == 0 else 8
+        right = 0 if col == len(device_titles) - 1 else 8
+        card.frame.grid(row=0, column=col, sticky="nsew", padx=(left, right))
+        cards.append(card)
 
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
     foot.pack(fill="x", side="bottom")
@@ -411,22 +454,22 @@ def build_ui():
 
     # ---- 刷新逻辑 ----
     def apply(readings: list[Reading]):
-        card_atk.update(readings[0])
-        card_dr.update(readings[1])
+        for card, reading in zip(cards, readings):
+            card.update(reading)
         ok = sum(1 for r in readings if r.ok)
         foot.configure(text=f"更新于 {time.strftime('%H:%M:%S')}   "
-                            f"成功读取 {ok}/2 个设备"
+                            f"成功读取 {ok}/{len(readings)} 个设备"
                             + ("" if state["auto"] else "   （自动刷新已关闭）"))
         state["busy"] = False
         btn.configure(state="normal")
 
     def worker():
         try:
-            readings = read_all()
+            readings = read_all(include_logitech)
         except Exception:
             traceback.print_exc()
-            readings = [Reading("ATK 鼠标", "", error="读取异常"),
-                        Reading("DARKRIM 耳机", "", error="读取异常")]
+            readings = [Reading(title, "", error="读取异常")
+                        for title in device_titles]
         results.put(("readings", readings))
 
     def refresh():

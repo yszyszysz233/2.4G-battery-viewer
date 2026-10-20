@@ -512,6 +512,67 @@ def _logitech_probe_index(dev: HidDevice, iface: HidInterface, rid: int,
 
 
 # --------------------------------------------------------------------------
+# 罗技设备发现（G304 / G305 等 LIGHTSPEED 接收器）
+# --------------------------------------------------------------------------
+LOGITECH_VID = 0x046D
+HIDPP_USAGE_PAGE = 0xFF00
+
+
+def logitech_interfaces() -> list[HidInterface]:
+    """返回可能是 HID++ 接口的罗技接口，最可能可用的排在前面。
+
+    LIGHTSPEED 接收器通常有多个厂商集合：
+      0xFF00:0x0001（7 字节短报文）
+      0xFF00:0x0002（20 字节长报文）← G304 / G305
+      0xFF00:0x0004（32 字节，部分新接收器，不能用于 HID++）
+    只按 VID + 厂商 usage page 过滤，不写死 PID，换接收器也能用。
+    """
+    items = [d for d in hw.enumerate_hid()
+             if d.vid == LOGITECH_VID and d.is_vendor_page
+             and d.output_len in (7, 20)]
+
+    def score(d: HidInterface) -> int:
+        s = 0
+        if d.usage_page == HIDPP_USAGE_PAGE:
+            s += 100
+        if d.usage == 0x0002:
+            s += 40
+        elif d.usage == 0x0001:
+            s += 30
+        if d.output_len == 20:
+            s += 50
+        elif d.output_len == 7:
+            s += 40
+        return s
+
+    return sorted(items, key=score, reverse=True)
+
+
+def read_logitech() -> Optional[BatteryResult]:
+    """在罗技 HID++ 接口上找设备并读电量。
+
+    返回 None 表示系统里没有罗技厂商接口；找到接口但设备没回复时返回
+    ok=False 的结果（通常是鼠标电源关闭或正在休眠）。
+    """
+    ifaces = logitech_interfaces()
+    if not ifaces:
+        return None
+    last: Optional[BatteryResult] = None
+    for iface in ifaces:
+        res = strategy_logitech_hidpp(iface)
+        if res is None:
+            continue
+        if res.ok:
+            return res
+        last = res
+    return last or BatteryResult(
+        ok=False, source="罗技 HID++ 2.0",
+        detail="找到罗技接收器，但设备没有回复（请确认鼠标已开机；"
+               "动一下鼠标后重试）",
+    )
+
+
+# --------------------------------------------------------------------------
 # 策略 E：监听 Input Report 上报的电量
 # --------------------------------------------------------------------------
 def monitor_input_reports(iface: HidInterface, seconds: float = 3.0,

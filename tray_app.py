@@ -3,7 +3,8 @@
 
 界面约定
 --------
-* 通知区域两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）。
+* 通知区域固定两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）；
+  检测到罗技接收器时再增加一个 G304 图标。
   图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
 * **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
 * 左键图标 → 立刻刷新一次。
@@ -159,6 +160,9 @@ TRAY_ICONS = [
     (1, "mouse", "ATK 鼠标", False),
     (2, "headset", "DARKRIM 耳机", True),
 ]
+HAS_LOGITECH = bool(bt.logitech_interfaces())
+if HAS_LOGITECH:
+    TRAY_ICONS.append((3, "logitech", "罗技 G304", False))
 
 
 # --------------------------------------------------------------------------
@@ -189,6 +193,19 @@ def read_mouse() -> tuple[Optional[int], str]:
 
 def read_headset() -> tuple[Optional[int], str]:
     return drp.read_battery_only(timeout=0.4)
+
+
+def read_logitech_mouse() -> tuple[Optional[int], str]:
+    """罗技 G304 / G305（LIGHTSPEED 接收器，HID++ 2.0）。"""
+    try:
+        res = bt.read_logitech()
+    except Exception as e:
+        return None, f"读取失败：{e}"
+    if res is None:
+        return None, "没找到罗技接收器"
+    if res.ok:
+        return res.level, ""
+    return None, res.detail or "无回复（动一下鼠标）"
 
 
 # --------------------------------------------------------------------------
@@ -303,16 +320,24 @@ class TrayApp:
 
     def _worker(self, hwnd: int) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
+            for _, key, _, _ in TRAY_ICONS:
+                if key == "mouse":
+                    self.levels[key] = read_mouse()
+                elif key == "headset":
+                    self.levels[key] = read_headset()
+                elif key == "logitech":
+                    self.levels[key] = read_logitech_mouse()
         except Exception:
             self.log("读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
+        parts = []
+        for _, key, title, _ in TRAY_ICONS:
+            level, err = self.levels[key]
+            parts.append(f"{title}={level}（{err or 'ok'}）")
+        self.log("刷新完成：" + "  ".join(parts))
         self.update_icons()
 
     # ---- 打开简洁界面 ---------------------------------------------------
@@ -436,7 +461,7 @@ def main() -> int:
         if tc.is_tray_running():
             # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里两个数字图标就是它；右键图标打开界面）")
+            print("已经在运行了（托盘里的数字图标就是它；右键图标打开界面）")
             return 0
         # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
         tc.cleanup_zombie()
