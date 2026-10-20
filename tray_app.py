@@ -3,7 +3,7 @@
 
 界面约定
 --------
-* 通知区域两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）。
+* 每台设备可独立启用托盘图标，数量不受主页卡片限制。
   图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
 * **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
 * 左键图标 → 立刻刷新一次。
@@ -37,8 +37,7 @@ from ctypes import wintypes
 from typing import Optional
 
 import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import device_service as ds
 import win_icon
 import tray_common as tc
 
@@ -154,46 +153,6 @@ KERNEL32.CreateMutexW.restype = ctypes.c_void_p
 KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
                                   wintypes.LPCWSTR]
 
-TRAY_ICONS = [
-    # (uID, key, 提示名, 是否带底板)
-    (1, "mouse", "ATK 鼠标", False),
-    (2, "headset", "DARKRIM 耳机", True),
-]
-
-
-# --------------------------------------------------------------------------
-# 设备读取（轻量版）
-# --------------------------------------------------------------------------
-def _find_iface(vid: int, usage_page: int, output_len: int = 0):
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
-
-
-def read_mouse() -> tuple[Optional[int], str]:
-    iface = _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02)
-    if iface is None:
-        return None, "没找到接收器"
-    try:
-        res = bt.strategy_vendor_protocol(iface)
-    except Exception as e:
-        return None, f"读取失败：{e}"
-    if res is None:
-        return None, "没有可用的读取方式"
-    if res.ok:
-        return res.level, ""
-    return None, res.detail or "无回复（动一下鼠标）"
-
-
-def read_headset() -> tuple[Optional[int], str]:
-    return drp.read_battery_only(timeout=0.4)
-
-
-# --------------------------------------------------------------------------
-# 托盘程序
-# --------------------------------------------------------------------------
 class TrayApp:
     def __init__(self, debug: bool = False):
         self.debug = debug
@@ -201,8 +160,13 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
-        self.levels = {k: (None, "正在读取…") for _, k, _, _ in TRAY_ICONS}
-        self.icons_added = False
+        self.tray_keys = self.cfg["tray_devices"]
+        self.icons = self.icon_specs(self.tray_keys or [], {})
+        self.levels = {key: (None, "正在读取…") for _, key, _, _ in self.icons}
+        self.added_icons = set()
+        self.revision = 0
+        self.refresh_pending = False
+        self.completed = None
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
         self.msg_reload = USER32.RegisterWindowMessageW(tc.MSG_RELOAD)
@@ -245,75 +209,110 @@ class TrayApp:
         nid = self._nid(uID)
         nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
         nid.szTip = (f"{title}：{level}%（{time.strftime('%H:%M:%S')} 更新）"
-                     if level is not None else f"{title}：{err or '未知'}")
+                     if level is not None else f"{title}：{err or '未知'}")[:127]
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
+    def icon_specs(self, keys, devices):
+        icons = []
+        for position, key in enumerate(dict.fromkeys(key for key in keys if key)):
+            title = (devices[key].title if key in devices
+                     else self.cfg["device_labels"].get(key, ds.KNOWN.get(key, (key,))[0]))
+            icons.append((position + 1, key, title, position % 2 == 1))
+        return icons or [(1, "overview", tc.UI_TITLE, False)]
+
     def add_icons(self) -> None:
-        for uID, key, title, plate in TRAY_ICONS:
-            ok = self._apply_icon(NIM_ADD, uID, key, title, plate)
-            self.log(f"NIM_ADD {title} -> {'ok' if ok else '失败'}")
-        self.icons_added = True
+        for uid, key, title, plate in self.icons:
+            self.levels.setdefault(key, (None, "请在设备与托盘中启用设备"))
+            if self._apply_icon(NIM_ADD, uid, key, title, plate):
+                self.added_icons.add(uid)
 
     def update_icons(self) -> None:
-        if not self.icons_added:
-            self.add_icons()
-            return
-        for uID, key, title, plate in TRAY_ICONS:
-            self._apply_icon(NIM_MODIFY, uID, key, title, plate)
+        for uid, key, title, plate in self.icons:
+            action = NIM_MODIFY if uid in self.added_icons else NIM_ADD
+            if self._apply_icon(action, uid, key, title, plate):
+                self.added_icons.add(uid)
 
     def remove_icons(self) -> None:
-        for uID, _, _, _ in TRAY_ICONS:
-            nid = self._nid(uID)
-            nid.uFlags = 0
+        for uid in self.added_icons:
+            nid = self._nid(uid)
             SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
-        self.icons_added = False
+        self.added_icons.clear()
 
-    # ---- 定时器 / 刷新 --------------------------------------------------
     def apply_timer(self) -> None:
         if not self.hwnd:
             return
         USER32.KillTimer(self.hwnd, 1)
-        USER32.SetTimer(self.hwnd, 1, int(self.cfg["interval"]) * 1000, None)
+        if self.cfg["auto_refresh"]:
+            USER32.SetTimer(self.hwnd, 1, int(self.cfg["interval"]) * 1000, None)
 
     def apply_config(self) -> None:
-        """同步界面里改过的设置。
-
-        注意：开机自启这里**只读不改**——托盘绝不替用户动系统设置。
-        （早先的版本会自动"纠正"，结果一次读到不一致就把用户的启动项删了。）
-        """
         new = tc.load_config()
-        changed = new["interval"] != self.cfg["interval"]
+        changed = new["tray_devices"] != self.tray_keys
+        timer_changed = any(new[k] != self.cfg[k] for k in ("interval", "auto_refresh"))
         self.cfg = new
-        if changed:
-            self.log(f"刷新间隔 -> {new['interval']} 秒")
+        if timer_changed:
             self.apply_timer()
-
-        actual = tc.is_autostart_enabled()
-        if bool(self.cfg.get("autostart")) != actual:
-            # 只把真实状态写回配置，让界面上的勾选和任务管理器保持一致
-            self.cfg["autostart"] = actual
-            tc.save_config(self.cfg)
-            self.log(f"开机自启实际为 {actual}，已同步到配置（未改动系统设置）")
+        if changed:
+            self.revision += 1
+            self.tray_keys = new["tray_devices"]
+            self.remove_icons()
+            self.icons = self.icon_specs(self.tray_keys or [], {})
+            self.levels = {key: (None, "正在读取…") for _, key, _, _ in self.icons}
+            self.add_icons()
+            self.refresh_now()
 
     def refresh_now(self) -> None:
-        if self.busy or not self.hwnd:
+        if not self.hwnd:
+            return
+        if self.busy:
+            self.refresh_pending = True
             return
         self.busy = True
-        threading.Thread(target=self._worker, args=(self.hwnd,), daemon=True).start()
+        revision, cfg = self.revision, dict(self.cfg)
+        threading.Thread(target=self._worker, args=(self.hwnd, revision, cfg), daemon=True).start()
 
-    def _worker(self, hwnd: int) -> None:
+    def _worker(self, hwnd, revision, cfg) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
-        except Exception:
+            devices = ds.discover_devices()
+            keys = ds.tray_device_keys(cfg, devices)
+            readings = ds.read_selected(keys, devices, cfg["device_labels"])
+            self.completed = (revision, keys, devices, readings, "")
+        except Exception as error:
+            self.completed = (revision, cfg["tray_devices"] or [], {}, {}, str(error))
             self.log("读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
-        self.update_icons()
+        result, self.completed = self.completed, None
+        if result and result[0] == self.revision:
+            _, keys, devices, readings, error = result
+            if self.tray_keys is None and not error:
+                try:
+                    labels = dict(self.cfg["device_labels"])
+                    labels.update({k: devices[k].title for k in keys if k in devices})
+                    self.cfg = tc.update_config(tray_devices=keys, device_labels=labels)
+                except OSError as save_error:
+                    self.log(f"保存设备选择失败：{save_error}")
+            self.tray_keys = keys
+            icons = self.icon_specs(keys, devices)
+            changed = icons != self.icons
+            if changed:
+                self.remove_icons()
+                self.icons = icons
+            self.levels = {
+                key: (readings[key].level, readings[key].error or readings[key].status)
+                if key in readings else (None, error or "请在设备与托盘中启用设备")
+                for _, key, _, _ in self.icons
+            }
+            if changed:
+                self.add_icons()
+            else:
+                self.update_icons()
+            self.log("刷新完成：" + str(self.levels))
+        if self.refresh_pending:
+            self.refresh_pending = False
+            self.refresh_now()
 
     # ---- 打开简洁界面 ---------------------------------------------------
     def open_ui(self) -> None:
@@ -358,7 +357,8 @@ class TrayApp:
             return 0
         if msg == WM_TIMER:
             self.apply_config()                    # 顺手同步一下界面里改的设置
-            self.refresh_now()
+            if not self.busy:
+                self.refresh_now()
             return 0
         if msg == self.msg_quit:
             self.quit()
@@ -368,6 +368,7 @@ class TrayApp:
             return 0
         if msg == self.taskbar_created_msg:
             self.log("任务栏重建，重新添加图标")
+            self.added_icons.clear()
             self.add_icons()
             return 0
         if msg == WM_DESTROY:
@@ -436,7 +437,7 @@ def main() -> int:
         if tc.is_tray_running():
             # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里两个数字图标就是它；右键图标打开界面）")
+            print("已经在运行了（右键电量托盘图标可打开主页）")
             return 0
         # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
         tc.cleanup_zombie()

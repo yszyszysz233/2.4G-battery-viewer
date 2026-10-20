@@ -383,132 +383,41 @@ def strategy_vendor_protocol(iface: HidInterface) -> Optional[BatteryResult]:
 
 
 # --------------------------------------------------------------------------
-# 策略 C：罗技 HID++ 2.0
+# 已验证的设备专用策略：VGN S99、迈从 X9、罗技 HID++ 2.0
 # --------------------------------------------------------------------------
-HIDPP_DEVICE_INDICES = [0xFF, 1, 2, 3, 4, 5, 6]
-
-_FEATURE_BATTERY_STATUS = 0x1000
-_FEATURE_BATTERY_VOLTAGE = 0x1001
-_FEATURE_UNIFIED_BATTERY = 0x1004
-_FEATURE_DEVICE_NAME = 0x0005
-
-_HIDPP_STATUS = {
-    0: ("discharging", "放电中"),
-    1: ("charging", "充电中"),
-    2: ("charging", "充电中（末段）"),
-    3: ("full", "已充满"),
-    4: ("charging", "充电中（慢速）"),
-    5: ("unknown", "电池类型无效"),
-    6: ("unknown", "温度异常"),
-    7: ("unknown", "充电异常"),
-}
-
-
-def _hidpp_error(report: bytes) -> Optional[int]:
-    if len(report) < 4:
+def strategy_vgn_s99(iface: HidInterface, interfaces=None) -> Optional[BatteryResult]:
+    import vgn_s99
+    if not vgn_s99.is_s99(iface):
         return None
-    if report[3] & 0x80:
-        return report[4] if len(report) > 4 else 0xFF
-    return None
+    return vgn_s99.read_battery(interfaces if interfaces is not None else [iface])
 
 
-def _hidpp_call(dev: HidDevice, rid: int, index: int, feature_index: int,
-                function: int, params: list, timeout_ms: int = 260,
-                total_len: Optional[int] = None) -> Optional[bytes]:
-    body = [rid, index, feature_index, ((function & 0x0F) << 4) | 0x01] + list(params)
-    length = total_len or (20 if rid == 0x11 else 7)
-    body = (body + [0] * length)[:length]
+def strategy_mchose_x9(iface: HidInterface, interfaces=None) -> Optional[BatteryResult]:
+    import mchose_x9
+    if not mchose_x9.is_x9(iface):
+        return None
+    return mchose_x9.read_battery(interfaces if interfaces is not None else [iface])
+
+
+def strategy_logitech_hidpp(iface: HidInterface, interfaces=None) -> Optional[BatteryResult]:
+    if iface.vid != 0x046D or iface.usage_page != 0xFF00 or iface.output_len not in (7, 20):
+        return None
+    import logitech_hidpp as lh
+    if interfaces is None:
+        interfaces = [d for d in hw.enumerate_hid()
+                      if d.vid == iface.vid and d.pid == iface.pid]
     try:
-        dev.write_output(bytes(body))
-    except HidError:
-        return None
-    deadline = time.monotonic() + timeout_ms / 1000.0
-    while time.monotonic() < deadline:
-        report = dev.read_input(timeout_ms=int(min(0.15, deadline - time.monotonic()) * 1000) or 1)
-        if not report or len(report) < 4:
-            break
-        if report[0] != rid or report[1] != index or report[2] != feature_index:
-            continue
-        if ((report[3] >> 4) & 0x0F) != function:
-            continue
-        return report
-    return None
-
-
-def _hidpp_feature_index(dev: HidDevice, rid: int, index: int, feature_id: int) -> Optional[int]:
-    reply = _hidpp_call(dev, rid, index, 0x00, 0x00,
-                        [feature_id >> 8, feature_id & 0xFF])
-    if not reply or _hidpp_error(reply) is not None:
-        return None
-    # 短报文 / 长报文的返回位置可能不同，逐个试探并验证
-    for pos in (6, 4, 5):
-        if len(reply) > pos and reply[pos]:
-            return reply[pos]
-    return None
-
-
-def strategy_logitech_hidpp(iface: HidInterface) -> Optional[BatteryResult]:
-    if iface.vid != 0x046D or not iface.output_len:
-        return None
-    try:
-        with HidDevice(iface.path, write=True) as dev:
-            for rid in (0x11, 0x10):
-                if dev.caps.OutputReportByteLength and dev.caps.OutputReportByteLength < (
-                        20 if rid == 0x11 else 7):
-                    continue
-                for index in HIDPP_DEVICE_INDICES:
-                    res = _logitech_probe_index(dev, iface, rid, index)
-                    if res is not None:
-                        return res
-    except HidError as e:
-        return BatteryResult(ok=False, source="罗技 HID++",
-                             detail=f"无法打开厂商接口：{e}")
-    return None
-
-
-def _logitech_probe_index(dev: HidDevice, iface: HidInterface, rid: int,
-                          index: int) -> Optional[BatteryResult]:
-    fidx = _hidpp_feature_index(dev, rid, index, _FEATURE_BATTERY_STATUS)
-    if fidx:
-        reply = _hidpp_call(dev, rid, index, fidx, 0x00, [])
-        if reply and _hidpp_error(reply) is None and len(reply) >= 7:
-            raw_level, next_level, st = reply[4], reply[5], reply[6]
-            status, text = _HIDPP_STATUS.get(st, ("unknown", f"状态 {st}"))
-            level = raw_level
-            if level == 0 and status != "discharging":   # 充电时设备常报 0
-                level = {"charging": 80, "full": 100}.get(status, 0)
-            return BatteryResult(
-                ok=True, level=max(0, min(100, level)), raw_level=raw_level,
-                status=status, source="罗技 HID++ 2.0（0x1000 电池状态）",
-                detail=f"设备索引 {index}：电量={raw_level}% 状态={text}",
-                raw=reply,
-            )
-
-    fidx = _hidpp_feature_index(dev, rid, index, _FEATURE_UNIFIED_BATTERY)
-    if fidx:
-        reply = _hidpp_call(dev, rid, index, fidx, 0x00, [])
-        if reply and _hidpp_error(reply) is None and len(reply) >= 6:
-            raw_level, st = reply[4], reply[5]
-            status, text = _HIDPP_STATUS.get(st, ("unknown", f"状态 {st}"))
-            return BatteryResult(
-                ok=True, level=max(0, min(100, raw_level)), raw_level=raw_level,
-                status=status, source="罗技 HID++ 2.0（0x1004 统一电池）",
-                detail=f"设备索引 {index}：电量={raw_level}% 状态={text}", raw=reply,
-            )
-
-    fidx = _hidpp_feature_index(dev, rid, index, _FEATURE_BATTERY_VOLTAGE)
-    if fidx:
-        reply = _hidpp_call(dev, rid, index, fidx, 0x00, [])
-        if reply and _hidpp_error(reply) is None and len(reply) >= 6:
-            mv = reply[4] | (reply[5] << 8)
-            if 2000 <= mv <= 5000:
-                return BatteryResult(
-                    ok=True, level=None, voltage_mv=mv, status="unknown",
-                    source="罗技 HID++ 2.0（0x1001 电池电压）",
-                    detail=f"设备索引 {index}：电压 {mv} mV（该机型不直接给百分比）",
-                    raw=reply,
-                )
-    return None
+        state = lh.read_battery(interfaces, index=1)
+        detail = f"设备索引 1 · 特性 0x{state.feature:04X}"
+        if state.voltage_mv is not None:
+            detail += f" · {state.voltage_mv} mV（设备未提供百分比）"
+        return BatteryResult(
+            ok=True, level=state.level, raw_level=state.level, status=state.status,
+            voltage_mv=state.voltage_mv, source=f"罗技 HID++ 2.0 · 0x{state.feature:04X}",
+            detail=detail, raw=state.raw, extra=state.extra,
+        )
+    except (HidError, OSError) as error:
+        return BatteryResult(ok=False, source="罗技 HID++", detail=str(error))
 
 
 # --------------------------------------------------------------------------
@@ -674,6 +583,8 @@ def read_battery(iface: HidInterface, listen_seconds: float = 3.0,
     steps = [
         ("标准 HID 电量字段", lambda: strategy_standard_battery_usage(iface)),
         ("DARKRIM 私有协议", lambda: strategy_darkrim(iface)),
+        ("VGN S99 电量", lambda: strategy_vgn_s99(iface)),
+        ("迈从 X9 电量", lambda: strategy_mchose_x9(iface)),
         ("厂商协议", lambda: strategy_vendor_protocol(iface)),
         ("罗技 HID++", lambda: strategy_logitech_hidpp(iface)),
     ]

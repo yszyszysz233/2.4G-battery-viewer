@@ -30,7 +30,11 @@ UI_TITLE = "我的设备电量"
 
 DEFAULT_CONFIG = {
     "interval": 60,        # 托盘轮询间隔（秒）
-    "autostart": True,     # 开机自启
+    "autostart": False,    # 开机自启只通过用户点击启用
+    "auto_refresh": True,
+    "selected_devices": None,  # None = 首次启动，按已连接设备初始化
+    "tray_devices": None,      # 独立于主页，数量不限；None = 首次按已连接设备初始化
+    "device_labels": {},
 }
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
@@ -57,27 +61,70 @@ USER32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
 # --------------------------------------------------------------------------
 # 配置
 # --------------------------------------------------------------------------
-def load_config() -> dict:
-    cfg = dict(DEFAULT_CONFIG)
+def normalize_config(data) -> dict:
+    cfg = dict(DEFAULT_CONFIG, device_labels={})
+    if not isinstance(data, dict):
+        return cfg
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            for k in DEFAULT_CONFIG:
-                if k in data:
-                    cfg[k] = data[k]
-    except Exception:
+        interval = int(data.get("interval", 60))
+        cfg["interval"] = max(30, min(1800, interval))
+    except (ValueError, TypeError, OverflowError):
         pass
+    for key in ("autostart", "auto_refresh"):
+        if isinstance(data.get(key), bool):
+            cfg[key] = data[key]
+    selected = data.get("selected_devices")
+    if isinstance(selected, list):
+        slots = [(v if isinstance(v, str) and len(v) < 100 else "") for v in selected[:2]]
+        slots += [""] * (2 - len(slots))
+        if slots[0] and slots[0] == slots[1]:
+            slots[1] = ""
+        cfg["selected_devices"] = slots
+    tray = data.get("tray_devices")
+    if isinstance(tray, list):
+        cfg["tray_devices"] = list(dict.fromkeys(
+            key for key in tray if isinstance(key, str) and key and len(key) < 100))
+    elif "tray_devices" not in data and cfg["selected_devices"] is not None:
+        # Preserve the old tray selection once, before the home cards change.
+        cfg["tray_devices"] = [key for key in cfg["selected_devices"] if key]
+    labels = data.get("device_labels")
+    if isinstance(labels, dict):
+        cfg["device_labels"] = {k: v[:100] for k, v in labels.items()
+                                if isinstance(k, str) and isinstance(v, str)}
     return cfg
 
 
-def save_config(cfg: dict) -> None:
-    clean = {k: cfg.get(k, DEFAULT_CONFIG[k]) for k in DEFAULT_CONFIG}
+def load_config() -> dict:
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(clean, f, ensure_ascii=False, indent=2)
-    except OSError:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return normalize_config(data)
+    except Exception:
         pass
+    return normalize_config({})
+
+
+def save_config(cfg: dict) -> None:
+    import tempfile
+    clean = normalize_config(cfg)
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=BASE_DIR,
+                                         prefix=".config-", suffix=".tmp", delete=False) as f:
+            pending = f.name
+            json.dump(clean, f, ensure_ascii=False, indent=2)
+        os.replace(pending, CONFIG_PATH)
+    except OSError:
+        if pending and os.path.exists(pending):
+            os.remove(pending)
+        raise
+
+
+def update_config(**changes) -> dict:
+    cfg = load_config()
+    cfg.update(changes)
+    save_config(cfg)
+    return normalize_config(cfg)
 
 
 # --------------------------------------------------------------------------
@@ -209,7 +256,7 @@ def set_autostart(enabled: bool) -> bool:
             startup_lnk(), pythonw_path(),
             arguments=f'"{tray_script()}"',
             workdir=BASE_DIR,
-            description="设备电量托盘：常驻显示 ATK 鼠标 / DARKRIM 耳机电量")
+            description="设备电量查看器：在托盘显示逐台启用的设备电量")
         _set_startup_approved(True)
     else:
         _clear_startup_approved()
