@@ -1,0 +1,126 @@
+name: Build Windows
+
+on:
+  push:
+    branches:
+      - feat/xiaomi-razer-steelseries
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build BatteryViewer.exe (panel)
+        run: >
+          pyinstaller
+          --noconfirm
+          --clean
+          --onefile
+          --windowed
+          --name BatteryViewer
+          --hidden-import=devices
+          --hidden-import=tray_common
+          --hidden-import=tray_prefs
+          --hidden-import=win_link
+          --hidden-import=win_shell
+          --hidden-import=win_icon
+          --hidden-import=hid_win
+          --hidden-import=hid_common
+          --hidden-import=xiaomi_proto
+          --hidden-import=razer_proto
+          --hidden-import=steelseries_proto
+          my_devices.py
+
+      - name: Preserve BatteryViewer.exe before second clean build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item dist\BatteryViewer.exe release\
+
+      - name: Build BatteryTray.exe (tray)
+        run: >
+          pyinstaller
+          --noconfirm
+          --clean
+          --onefile
+          --windowed
+          --name BatteryTray
+          --hidden-import=devices
+          --hidden-import=tray_common
+          --hidden-import=tray_prefs
+          --hidden-import=win_link
+          --hidden-import=win_shell
+          --hidden-import=win_icon
+          --hidden-import=hid_win
+          --hidden-import=hid_common
+          --hidden-import=xiaomi_proto
+          --hidden-import=razer_proto
+          --hidden-import=steelseries_proto
+          tray_app.py
+
+      - name: Stage zip contents
+        shell: pwsh
+        run: |
+          Copy-Item dist\BatteryTray.exe release\
+          Copy-Item "使用说明.txt" release\
+          Get-ChildItem release | Format-Table Name, Length
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path release\* -DestinationPath 2.4G-battery-viewer-windows.zip -Force
+          Get-Item 2.4G-battery-viewer-windows.zip | Format-List FullName, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2.4G-battery-viewer-windows
+          path: 2.4G-battery-viewer-windows.zip
+          if-no-files-found: error
+
+      - name: Draft GitHub Release with zip asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v0.1.0-win"
+          TITLE="Windows 便携版 ${TAG}"
+          NOTES="$(cat <<'MD'
+          解压后直接运行，无需安装 Python。
+
+          - `BatteryViewer.exe`：简洁电量面板
+          - `BatteryTray.exe`：系统托盘常驻
+          - `使用说明.txt`：使用前请阅读（雷蛇需先退出 Synapse）
+
+          未签名 EXE，首次运行可能被 SmartScreen 拦截，选「更多信息」→「仍要运行」即可。
+          MD
+          )"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" 2.4G-battery-viewer-windows.zip --clobber
+            gh release edit "$TAG" --draft --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create "$TAG" 2.4G-battery-viewer-windows.zip \
+              --draft \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --target "${{ github.sha }}"
+          fi
+
+          echo "Release page: https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          gh release view "$TAG"

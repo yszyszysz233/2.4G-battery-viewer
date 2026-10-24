@@ -35,8 +35,62 @@ GLYPH_W, GLYPH_H = 3, 5
 
 def render_rgba(text: str, size: int, color: tuple[int, int, int],
                 plate: bool = False, plate_color=(28, 30, 34, 235)) -> bytes:
-    """把文字渲染成 size×size 的 RGBA 像素（返回 size*size*4 字节，行优先）。"""
+    """把文字渲染成 size×size 的 RGBA 像素（返回 size*size*4 字节，行优先）。
+
+    text 为空时只画底板/色块（「仅图标」模式，不显示百分比数字）。
+    """
     n = len(text)
+    px = bytearray(size * size * 4)
+
+    def put(x: int, y: int, rgba):
+        if 0 <= x < size and 0 <= y < size:
+            i = (y * size + x) * 4
+            px[i:i + 4] = bytes(rgba)
+
+    def get(x: int, y: int):
+        i = (y * size + x) * 4
+        return (px[i], px[i + 1], px[i + 2], px[i + 3])
+
+    # 底衬（耳机图标用，跟鼠标图标区分开；仅图标模式也用）
+    if plate or not text:
+        r = max(1, size // 8)
+        for y in range(size):
+            for x in range(size):
+                # 圆角矩形
+                cx = min(x, size - 1 - x)
+                cy = min(y, size - 1 - y)
+                if cx + cy < r and cx < r and cy < r:
+                    continue
+                put(x, y, plate_color)
+
+    # 仅图标：无文字时画一块随电量变色的圆角色块
+    if not text:
+        r = max(1, size // 5)
+        margin = max(1, size // 5)
+        fill = (*color, 255)
+        for y in range(margin, size - margin):
+            for x in range(margin, size - margin):
+                cx = min(x - margin, size - margin - 1 - x)
+                cy = min(y - margin, size - margin - 1 - y)
+                if cx + cy < r and cx < r and cy < r:
+                    continue
+                put(x, y, fill)
+        # 描边
+        outline = (16, 17, 19, 190)
+        edge = []
+        for y in range(size):
+            for x in range(size):
+                if get(x, y)[3] == 0:
+                    continue
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < size and 0 <= ny < size and get(nx, ny)[3] == 0:
+                        edge.append((nx, ny))
+        for x, y in edge:
+            if get(x, y)[3] == 0:
+                put(x, y, outline)
+        return bytes(px)
+
     # 选一个能放下的最大缩放倍数
     gap = 1
     scale = 1
@@ -52,29 +106,6 @@ def render_rgba(text: str, size: int, color: tuple[int, int, int],
     total_h = gh
     ox = (size - total_w) // 2
     oy = (size - total_h) // 2
-
-    px = bytearray(size * size * 4)
-
-    def put(x: int, y: int, rgba):
-        if 0 <= x < size and 0 <= y < size:
-            i = (y * size + x) * 4
-            px[i:i + 4] = bytes(rgba)
-
-    def get(x: int, y: int):
-        i = (y * size + x) * 4
-        return (px[i], px[i + 1], px[i + 2], px[i + 3])
-
-    # 底衬（耳机图标用，跟鼠标图标区分开）
-    if plate:
-        r = max(1, size // 8)
-        for y in range(size):
-            for x in range(size):
-                # 圆角矩形
-                cx = min(x, size - 1 - x)
-                cy = min(y, size - 1 - y)
-                if cx + cy < r and cx < r and cy < r:
-                    continue
-                put(x, y, plate_color)
 
     # 逐字画
     for k, ch in enumerate(text):

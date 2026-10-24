@@ -17,3 +17,10 @@ tray_config.json
 .idea/
 Thumbs.db
 desktop.ini
+
+# PyInstaller
+build/
+dist/
+*.spec
+release/
+2.4G-battery-viewer-windows.zip

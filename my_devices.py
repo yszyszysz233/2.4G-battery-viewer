@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""我的设备电量 —— 只显示 ATK 鼠标 + DARKRIM 耳机的简洁面板
+"""我的设备电量 —— 小米 2.4G 鼠标 + 雷蛇耳机 + 赛睿耳机的简洁面板
 
 用法：
     python my_devices.py            打开界面（默认自动刷新）
     python my_devices.py --once     命令行读一次就退出
+    python my_devices.py --once -v  命令行读一次，并打印收发的原始报文（排错用）
 
-界面只有两块卡片，各显示一个设备的电量，可自动刷新。
-底层复用 battery.py / darkrim_proto.py 里已经验证过的协议。
+界面有三块卡片，各显示一类设备的电量，可自动刷新。
+读取逻辑在 devices.py，协议在 xiaomi_proto.py / razer_proto.py / steelseries_proto.py。
 """
 
 from __future__ import annotations
@@ -19,110 +20,42 @@ import traceback
 from dataclasses import dataclass
 from typing import Optional
 
-import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import devices
 import tray_common as tc
+import tray_prefs as prefs
 import win_link
-from hid_win import HidInterface
 
 
 # ==========================================================================
-# 读取层
+# 读取层（在 devices.py 里，这里只是转一下名字）
 # ==========================================================================
-@dataclass
-class Reading:
-    title: str
-    subtitle: str
-    level: Optional[int] = None
-    status: str = ""
-    detail: str = ""
-    error: str = ""
-    extra: str = ""
-
-    @property
-    def ok(self) -> bool:
-        return self.level is not None
-
-
-def _find(vid: int, usage_page: int, output_len: int = 0) -> Optional[HidInterface]:
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
-
-
-def read_atk() -> Reading:
-    """ATK / VXE 无线鼠标（内置协议 2）。"""
-    r = Reading("ATK 鼠标", "无接收器")
-    iface = _find(0x373B, 0xFF05, 64) or _find(0x373B, 0xFF02)
-    if iface is None:
-        r.error = "没找到接收器（请把 2.4G 接收器插上）"
-        return r
-    r.subtitle = f"{iface.vid_pid} · {iface.product or '2.4G 接收器'}"
-    try:
-        res = bt.strategy_vendor_protocol(iface) or bt.strategy_standard_battery_usage(iface)
-    except Exception as e:
-        r.error = f"读取出错：{e}"
-        return r
-    if res is None:
-        r.error = "这台设备没有可用的读取方式"
-        return r
-    if res.ok:
-        r.level = res.level
-        r.status = res.status_text
-        r.detail = res.source
-    else:
-        r.error = res.detail or "读取失败"
-    return r
-
-
-def read_darkrim() -> Reading:
-    """DARKRIM SHADOW 耳机（杰理方案 dongle，逆向协议）。"""
-    r = Reading("DARKRIM 耳机", "未连接")
-    try:
-        info = drp.read_info(timeout=0.35)
-    except Exception as e:
-        r.error = f"读取出错：{e}"
-        return r
-    if not info.online:
-        r.error = info.detail or "没找到 dongle"
-        return r
-    r.subtitle = f"3654:6901 · {info.name or 'DARKRIM'}"
-    r.level = info.battery
-    r.status = ""
-    r.detail = "私有 TLV 协议（TLV 0x01 = 电量）"
-    bits = []
-    if info.dongle_firmware:
-        bits.append(f"dongle 固件 {info.dongle_firmware}")
-    if info.headset_firmware:
-        bits.append(f"耳机固件 {info.headset_firmware}")
-    if info.address:
-        bits.append(f"地址 {info.address}")
-    if info.status_code is not None:
-        bits.append(f"状态码 {info.status_code}")
-    r.extra = " · ".join(bits)
-    if r.level is None and not r.error:
-        r.error = "耳机没有上报电量（请确认耳机已开机并连上）"
-    return r
-
-
-def read_all() -> list[Reading]:
-    return [read_atk(), read_darkrim()]
+Reading = devices.Reading
+read_all = devices.read_all
 
 
 # ==========================================================================
 # 命令行模式
 # ==========================================================================
-def cli_once() -> None:
+def cli_once(verbose: bool = False) -> None:
+    if verbose:
+        import hid_win as hw
+        import razer_proto
+        import steelseries_proto
+        import xiaomi_proto
+        ifaces = hw.enumerate_hid()
+        for mod in (xiaomi_proto, razer_proto, steelseries_proto):
+            res = mod.read_battery(ifaces)
+            print("\n".join(res.diag) or f"[{mod.__name__}] {res.detail}")
+        print()
     for r in read_all():
         if r.ok:
-            print(f"{r.title}: {r.level}%   {r.detail}")
+            st = f"  {r.status}" if r.status else ""
+            print(f"{r.title}: {r.level_text}{st}   {r.subtitle}   {r.detail}")
             if r.extra:
                 print(f"    {r.extra}")
         else:
-            print(f"{r.title}: 读取失败 —— {r.error}")
+            head = f"{r.status}，电量暂不可读" if r.status else "读取失败"
+            print(f"{r.title}: {head} —— {r.subtitle}  {r.error}")
 
 
 # ==========================================================================
@@ -136,8 +69,8 @@ MUTED = "#9aa0a6"
 FONT = ("Microsoft YaHei UI", 10)
 
 LEVEL_STYLE = [
-    (60, "#5ddc8a", "电量充足"),
-    (30, "#f5c451", "电量中等"),
+    (40, "#5ddc8a", "电量充足"),
+    (11, "#f5c451", "电量中等"),
     (0,  "#ff6b6b", "电量偏低"),
 ]
 
@@ -174,16 +107,16 @@ class DeviceCard:
         self.bar.pack(fill="x", pady=(10, 8))
 
         self.lab_detail = ttk.Label(self.frame, text="", style="CardSub.TLabel",
-                                    wraplength=250, justify="left")
+                                    wraplength=230, justify="left")
         self.lab_detail.pack(anchor="w")
         self.lab_extra = ttk.Label(self.frame, text="", style="CardSub.TLabel",
-                                   wraplength=250, justify="left")
+                                   wraplength=230, justify="left")
         self.lab_extra.pack(anchor="w", pady=(4, 0))
 
     def update(self, r: Reading) -> None:
         self.lab_sub.configure(text=r.subtitle)
         if r.ok:
-            self.lab_level.configure(text=f"{r.level}%",
+            self.lab_level.configure(text=r.level_text,
                                      foreground=level_color(r.level))
             st = r.status if r.status not in ("未知", "状态未知") else ""
             self.lab_status.configure(text=st)
@@ -192,7 +125,7 @@ class DeviceCard:
             self.lab_extra.configure(text=r.extra)
         else:
             self.lab_level.configure(text="--", foreground=MUTED)
-            self.lab_status.configure(text="")
+            self.lab_status.configure(text=r.status)
             self.bar["value"] = 0
             self.lab_detail.configure(text=r.error)
             self.lab_extra.configure(text="")
@@ -205,8 +138,8 @@ def build_ui():
     root = tk.Tk()
     root.title(tc.UI_TITLE)
     root.configure(bg=BG)
-    root.geometry("680x470")
-    root.minsize(620, 440)
+    root.geometry("900x480")
+    root.minsize(820, 450)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -263,17 +196,46 @@ def build_ui():
     ttk.Checkbutton(head, text="自动刷新", variable=v_auto,
                     command=on_auto).pack(side="right", padx=(0, 12))
 
+    v_tray_pct = tk.BooleanVar(value=bool(cfg.get("tray_show_percent", True)))
+
+    def on_tray_pct():
+        want = bool(v_tray_pct.get())
+        cfg["tray_show_percent"] = want
+        tc.save_config(cfg)
+        tc.post_to_tray(tc.MSG_RELOAD)
+        if want and not tc.is_tray_running():
+            # 勾选后若托盘未运行，后台拉起，否则看不到百分比图标
+            state["starting"] = True
+            state["started_at"] = time.time()
+            btn_tray.configure(state="disabled", text="正在启动…")
+            lab_tray.configure(text="正在启动托盘程序…")
+
+            def work():
+                try:
+                    ok = tc.start_tray_app()
+                except Exception:
+                    traceback.print_exc()
+                    ok = False
+                results.put(("tray", ok))
+
+            threading.Thread(target=work, daemon=True).start()
+        notify("托盘将显示电量百分比" if want else "托盘恢复为仅图标（不显示百分比）")
+
+    ttk.Checkbutton(head, text="在系统托盘显示电量百分比", variable=v_tray_pct,
+                    command=on_tray_pct).pack(side="right", padx=(0, 12))
+
     # ---- 卡片 ----
     body = ttk.Frame(root, padding=(18, 4, 18, 4))
     body.pack(fill="both", expand=True)
-    body.columnconfigure(0, weight=1, uniform="card")
-    body.columnconfigure(1, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
-
-    card_atk = DeviceCard(body, "ATK 鼠标")
-    card_atk.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    card_dr = DeviceCard(body, "DARKRIM 耳机")
-    card_dr.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    cards = []
+    n = len(devices.TITLES)
+    for col, title in enumerate(devices.TITLES):
+        body.columnconfigure(col, weight=1, uniform="card")
+        card = DeviceCard(body, title)
+        card.frame.grid(row=0, column=col, sticky="nsew",
+                        padx=(0 if col == 0 else 6, 0 if col == n - 1 else 6))
+        cards.append(card)
 
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
     foot.pack(fill="x", side="bottom")
@@ -401,6 +363,50 @@ def build_ui():
     ttk.Checkbutton(row_a, text="开机自启（任务管理器可见）", variable=v_boot,
                     command=on_boot).pack(side="left", padx=(18, 0))
 
+    v_start_min = tk.BooleanVar(value=bool(cfg.get("start_minimized", False)))
+
+    def on_start_min():
+        cfg["start_minimized"] = bool(v_start_min.get())
+        tc.save_config(cfg)
+        tc.post_to_tray(tc.MSG_RELOAD)
+        if v_start_min.get():
+            notify("已开启：启动时直接最小化到托盘（需托盘在运行）", 10)
+        else:
+            notify("已关闭：启动时显示主界面")
+
+    ttk.Checkbutton(row_a, text="开机自启直接最小化", variable=v_start_min,
+                    command=on_start_min).pack(side="left", padx=(18, 0))
+
+    v_close_tray = tk.BooleanVar(value=bool(cfg.get("close_to_tray", False)))
+
+    def on_close_to_tray():
+        want = bool(v_close_tray.get())
+        cfg["close_to_tray"] = want
+        tc.save_config(cfg)
+        tc.post_to_tray(tc.MSG_RELOAD)
+        if want:
+            if not tc.is_tray_running():
+                state["starting"] = True
+                state["started_at"] = time.time()
+                btn_tray.configure(state="disabled", text="正在启动…")
+                lab_tray.configure(text="正在启动托盘程序…")
+
+                def work():
+                    try:
+                        ok = tc.start_tray_app()
+                    except Exception:
+                        traceback.print_exc()
+                        ok = False
+                    results.put(("tray", ok))
+
+                threading.Thread(target=work, daemon=True).start()
+            notify("关闭窗口将最小化到托盘；请在托盘右键菜单选「关闭程式」真正退出", 12)
+        else:
+            notify("关闭窗口将退出程序")
+
+    ttk.Checkbutton(row_a, text="关闭ui=最小化到系统托盘", variable=v_close_tray,
+                    command=on_close_to_tray).pack(side="left", padx=(18, 0))
+
     btn_tray = ttk.Button(row_b, text="退出托盘程序", command=on_tray_toggle)
     btn_tray.pack(side="right")
     btn_link = ttk.Button(row_b, text="重建桌面链接", command=on_links)
@@ -411,11 +417,11 @@ def build_ui():
 
     # ---- 刷新逻辑 ----
     def apply(readings: list[Reading]):
-        card_atk.update(readings[0])
-        card_dr.update(readings[1])
+        for card, r in zip(cards, readings):
+            card.update(r)
         ok = sum(1 for r in readings if r.ok)
         foot.configure(text=f"更新于 {time.strftime('%H:%M:%S')}   "
-                            f"成功读取 {ok}/2 个设备"
+                            f"成功读取 {ok}/{len(readings)} 个设备"
                             + ("" if state["auto"] else "   （自动刷新已关闭）"))
         state["busy"] = False
         btn.configure(state="normal")
@@ -425,8 +431,7 @@ def build_ui():
             readings = read_all()
         except Exception:
             traceback.print_exc()
-            readings = [Reading("ATK 鼠标", "", error="读取异常"),
-                        Reading("DARKRIM 耳机", "", error="读取异常")]
+            readings = [Reading(t, "", error="读取异常") for t in devices.TITLES]
         results.put(("readings", readings))
 
     def refresh():
@@ -489,16 +494,44 @@ def build_ui():
         except Exception:
             pass
     root.after(250, raise_me)
+
+    def on_close():
+        """关闭按钮：可选藏到托盘，而不是退出。"""
+        if bool(v_close_tray.get()):
+            if not tc.is_tray_running():
+                try:
+                    tc.start_tray_app()
+                except Exception:
+                    traceback.print_exc()
+            try:
+                root.withdraw()
+            except Exception:
+                pass
+            notify("已最小化到托盘（右键托盘图标 → 关闭程式 可真正退出）", 10)
+            return
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    # 供 main() 启动时决定是否 withdraw
+    root._battery_start_minimized = bool(cfg.get("start_minimized", False))  # type: ignore[attr-defined]
+    root._battery_ensure_tray = tc.start_tray_app  # type: ignore[attr-defined]
     return root
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="我的设备电量")
     parser.add_argument("--once", action="store_true", help="命令行读一次就退出")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="配合 --once：打印收发的原始报文")
     parser.add_argument("--install-links", action="store_true",
                         help="在桌面重建软连接（项目文件夹 + 启动脚本）")
     parser.add_argument("--autostart", choices=["on", "off", "status"],
                         help="开机自启：on 打开 / off 关闭 / status 查看")
+    parser.add_argument("--minimized", action="store_true",
+                        help="启动时直接最小化到托盘（不显示主窗口）")
     args = parser.parse_args()
 
     if args.install_links:
@@ -529,8 +562,18 @@ def main() -> None:
         return
 
     if args.once:
-        cli_once()
+        cli_once(args.verbose)
         return
+
+    # 面板单实例：已打开则恢复/置前台，绝不第二窗口
+    ok, _ui_mutex = tc.claim_ui_single_instance()
+    if not ok:
+        if tc.activate_existing_ui():
+            print("简洁界面已在运行，已切换到前台")
+        else:
+            print("简洁界面似乎已在运行（未能定位窗口）")
+        return
+
     try:
         root = build_ui()
     except Exception:
@@ -538,6 +581,15 @@ def main() -> None:
         traceback.print_exc()
         cli_once()
         return
+
+    cfg = tc.load_config()
+    if prefs.should_start_minimized(cfg, argv_minimized=bool(args.minimized)):
+        try:
+            if not tc.is_tray_running():
+                tc.start_tray_app()
+            root.withdraw()
+        except Exception:
+            traceback.print_exc()
     root.mainloop()
 
 

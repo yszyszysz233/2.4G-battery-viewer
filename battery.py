@@ -280,6 +280,49 @@ def strategy_darkrim(iface: HidInterface) -> Optional[BatteryResult]:
 
 
 # --------------------------------------------------------------------------
+# 策略 A3：小米 2.4G 鼠标 / 雷蛇耳机 / 赛睿耳机（xiaomi_proto / razer_proto /
+#          steelseries_proto，协议出处见各文件开头）
+# --------------------------------------------------------------------------
+def strategy_family_protocols(iface: HidInterface) -> Optional[BatteryResult]:
+    """VID 是 0x2717 / 0x1532 / 0x1038 时，交给对应的协议模块整机读取。
+
+    这几个模块自己会挑接口（雷蛇/赛睿的电量通道只在特定 mi_XX 接口上），
+    所以这里拿同一设备（同 VID:PID）的全部接口给它们。
+    """
+    import razer_proto
+    import steelseries_proto
+    import xiaomi_proto
+
+    mods = {razer_proto.VID: razer_proto, steelseries_proto.VID: steelseries_proto,
+            xiaomi_proto.VID: xiaomi_proto}
+    mod = mods.get(iface.vid)
+    if mod is None:
+        return None
+    try:
+        same = [d for d in hw.enumerate_hid() if d.vid == iface.vid and d.pid == iface.pid]
+    except Exception:
+        same = []
+    same = same or [iface]
+    if mod is xiaomi_proto:
+        res = mod.read_battery(same)
+    else:
+        res = mod.read_device(iface.pid, same)
+    name = {razer_proto: "雷蛇耳机协议", steelseries_proto: "赛睿耳机协议",
+            xiaomi_proto: "小米鼠标"}[mod]
+    status = "unknown"
+    if res.charging is True:
+        status = "charging"
+    elif res.charging is False:
+        status = "discharging"
+    return BatteryResult(
+        ok=res.ok, level=res.level, raw_level=res.level, status=status,
+        voltage_mv=res.voltage_mv, source=f"{name}（{res.model}）",
+        detail=(res.detail or "") + ("（近似值：该型号只上报几档）" if res.approx and res.ok else ""),
+        extra={"diag": res.diag, "online": res.online, "approx": res.approx},
+    )
+
+
+# --------------------------------------------------------------------------
 # 策略 B / D：厂商协议（含用户自定义）
 # --------------------------------------------------------------------------
 def _matches(report: bytes, expect: tuple) -> bool:
@@ -672,6 +715,8 @@ def read_battery(iface: HidInterface, listen_seconds: float = 3.0,
     """按顺序跑所有策略，返回所有尝试记录（第一条 ok=True 的是结论）。"""
     attempts: list[BatteryResult] = []
     steps = [
+        # 放最前面：这三类设备的"标准"字段可能是 RF 信号强度，别被误读成电量
+        ("小米/雷蛇/赛睿协议", lambda: strategy_family_protocols(iface)),
         ("标准 HID 电量字段", lambda: strategy_standard_battery_usage(iface)),
         ("DARKRIM 私有协议", lambda: strategy_darkrim(iface)),
         ("厂商协议", lambda: strategy_vendor_protocol(iface)),

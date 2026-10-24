@@ -1,19 +1,74 @@
 # 设备电量查看器
 
-Windows 上读取 2.4G 无线外设电量的小工具。**纯 ctypes 调系统 DLL，零第三方依赖**——
+Windows 上读取 **小米 2.4G 鼠标 / 雷蛇无线耳机 / 赛睿无线耳机** 电量的小工具。**纯 ctypes 调系统 DLL，零第三方依赖**——
 不用 hidapi、不用 pystray、不用 Pillow、不用 pywin32，装了 Python 就能跑。
 
-## ⚠️ 只支持这两台设备
+## 支持的设备
 
-这**不是一个通用工具**。协议是逆向我们这两台具体设备得到的——换成别的鼠标或耳机，
-大概率一个字节都读不出来（界面会显示「没有可用的读取方式」）。
+面板和托盘只管三类设备：**小米 2.4G 鼠标、雷蛇无线耳机、赛睿无线耳机**。
+雷蛇 / 赛睿的协议全部来自公开的开源项目或抓包记录（出处写在每个协议文件开头和下表里），
+没有自己编字节；没有公开协议的型号会明确显示「暂不支持」，不会瞎报一个数。
 
-| 设备 | VID:PID | 读取方式 |
-|---|---|---|
-| ATK / VXE 无线鼠标 | `373B:1216` | usage page `0xFF05`，Report ID `0x08`，请求 `7D 72 02 00 01 07 01`，电量取回复第 7 字节 |
-| DARKRIM SHADOW 耳机（杰理方案 dongle） | `3654:6901` | 私有 TLV 协议：`CRC16-CCITT-FALSE` over `帧[1:10+len]`（大端），TLV `0x01` 即电量 |
+> ⚠️ 下面这些协议都是照公开资料实现的，作者手上没有这些设备，**还没在 Windows 真机上测过**。
+> 如果读数不对，请按文末「真机测试」一节跑一下诊断命令，把输出贴到 issue 里。
 
-**你的设备不在这两行里？** 别硬改这个仓库，往下看「用 prompt 做一份你自己的」。
+### 赛睿 SteelSeries（VID `1038`）—— `steelseries_proto.py`
+
+不需要 SteelSeries GG，可以和 GG 同时运行。
+
+| 型号 | PID | 电量精度 | 充电状态 |
+|---|---|---|---|
+| Arctis Nova 7 / 7 Gen 2 | `22A1` `227E`（老固件 `2202`） | 1%（老固件 4 档） | ✅ |
+| Arctis Nova 7x / 7X | `2258` `229E` `22AD` `22A5`（老固件 `2206` `22A4`） | 1%（老固件 4 档） | ✅ |
+| Arctis Nova 7P | `22A7` `2298`（老固件 `220A`） | 1%（老固件 4 档） | ✅ |
+| Arctis Nova 7 Diablo IV / WoW | `22A9`（老固件 `223A` `227A`） | 1%（老固件 4 档） | ✅ |
+| Arctis Nova 5 / 5X | `2232` `2253` | 1% | ✅ |
+| Arctis Nova 3P / 3X Wireless | `2269` `226D` | 1% | ✅ |
+| Arctis 7+（含 PS5 / Xbox / Destiny） | `220E` `2212` `2216` `2236` | 4 档 | ✅ |
+| Arctis GameBuds / GameBuds X | `230A` `2317` | 1%（取两只耳塞较低的） | — |
+| Arctis Nova Pro Wireless / X | `12E0` `12E5` | 8 档 | ✅ |
+| Arctis 1 Wireless / 1 Xbox / 7X / 7P（老款） | `12B3` `12B6` `12D7` `12D5` | 1% | — |
+| Arctis 7（2018） | `12AD` | 1% | — |
+| Arctis 7（2019）/ Arctis Pro Wireless 2019 | `1260` `1252` | 1% | — |
+| Arctis 9 | `12C2` | 1% | ✅ |
+| Arctis Pro Wireless | `1290` | 4 档 | — |
+
+「几档」的型号界面上显示为 `≈75%`。
+
+协议来源：
+[Sapd/HeadsetControl](https://github.com/Sapd/HeadsetControl)（commit `2c6790b`，只参考协议事实）、
+HaloBattery `providers/steelseries.py`（MIT，commit `2251f05`，补了「只认 b0 回复 / link 字节」等真机校验）、
+Linux 内核 `drivers/hid/hid-steelseries.c`。
+
+### 雷蛇 Razer（VID `1532`）—— `razer_proto.py`
+
+雷蛇耳机不走雷蛇鼠标那套 90 字节协议，每个系列都不一样，所以只做有公开资料的几款。
+读的时候建议**关掉 Razer Synapse**（它可能独占接口）。
+
+| 型号 | PID | 电量精度 | 充电状态 | 来源 |
+|---|---|---|---|---|
+| BlackShark V2 Pro (2023) | `0555` | 1% | ✅ | [openrazer PR #2862](https://github.com/openrazer/openrazer/pull/2862)、HaloBattery |
+| Barracuda Pro | `053A` | 1% | ✅ | HaloBattery（依据真机 Synapse 抓包） |
+| BlackShark V2 Pro (2020) | `0528` | 几档（100/80/50/30/10）+ 电压 | ✅（充电时设备报的电量不可靠，只显示「充电中」） | [openrazer #1280](https://github.com/openrazer/openrazer/issues/1280)、HaloBattery |
+| Nari | `051C` | 按电压估算（约） | — | [Modzeleczek/RazerNariBatteryLevel](https://github.com/Modzeleczek/RazerNariBatteryLevel) |
+| BlackShark V2 HyperSpeed | `0565`（2.4G 接收器）、`056E`（有线）、`0566`（社区报告的变体，实验性） | 1% | ✅ | [justik13/razer-blackshark-v2-hyperspeed-webhid](https://github.com/justik13/razer-blackshark-v2-hyperspeed-webhid) |
+
+**暂不支持**（找不到可靠的公开协议）：Kaira / Kaira Pro（Xbox 无线 / 蓝牙）、Barracuda / Barracuda X、
+Kraken V3 / V4 Pro、BlackShark V3 Pro、Nari Ultimate / Essential 等。插着这些型号时会提示「不是已支持的耳机型号」。
+
+### 小米 2.4G 鼠标（VID `2717`）—— `xiaomi_proto.py`
+
+**实话实说：小米 2.4G 接收器没有任何公开的电量协议。**
+Linux 内核 `hid-xiaomi.c` 只修了蓝牙 Silent Mouse 的侧键，libratbag / piper 也不支持小米鼠标
+（[libratbag #1800](https://github.com/libratbag/libratbag/issues/1800)）。所以这里不编私有字节，只做两件有依据的事：
+
+1. **标准 HID 电量字段**：接收器如果在报告描述符里声明了 Battery Strength（`0x06/0x20`）或
+   Battery System（`0x85`）字段，就直接读。故意不用 `0x06/0x29`（那是 RF 信号强度，不是电量）。
+2. **手动标定**：用 `python app.py` 抓到你这款鼠标的电量报文后「手动标定」（存到 `protocols_user.json`，VID 填 `2717`），
+   之后面板和托盘就能读。
+
+能认出名字的接收器：`5091` `5094`（Mi USB Receiver）、`500B`（游戏鼠标接收器）、`5013` `5017`（无线鼠标）、`50A6`（Mouse X1）。
+读不到时卡片会写「该型号未公开电量协议……」——这是预期行为，不是程序坏了。
 
 ## 使用方法
 
@@ -21,12 +76,37 @@ Windows 上读取 2.4G 无线外设电量的小工具。**纯 ctypes 调系统 D
 python my_devices.py
 ```
 
-面板里会显示两台设备的电量，默认自动刷新，底部可以改刷新间隔。
+面板里三张卡片：小米鼠标 / 雷蛇耳机 / 赛睿耳机，默认自动刷新，底部可以改刷新间隔、开关托盘、开机自启。
+颜色：≥40 绿 / 11–39 黄 / <11 红；没插接收器、耳机关机、型号不支持都会写清楚原因。
 
 - 只想看一眼：`python my_devices.py --once` —— 打印后退出
+- 排错：`python my_devices.py --once -v` —— 额外打印每个协议收发的原始报文
+- 托盘：`pythonw tray_app.py`（最多三个数字图标；没插接收器的那一类不显示图标）
 - 想摸新设备的协议：`python app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
+  （ATK / DARKRIM 的老协议还留在这里，面板和托盘不再显示它们）
+
+## 真机测试（还没人在 Windows 上测过，请帮忙）
+
+1. 插上接收器、打开耳机，**关掉 Razer Synapse**（赛睿 GG 可以开着）。
+2. 运行 `python my_devices.py --once -v`，看三行结果对不对：
+   - 电量跟官方软件差多少（几档的型号差 ±25% 属正常）；
+   - 插上充电线后是否显示「充电中」；
+   - 关掉耳机后是否显示「耳机未开机 / 不在接收范围」，而不是上一次的电量。
+3. 单独诊断某一类：`python steelseries_proto.py` / `python razer_proto.py` / `python xiaomi_proto.py`。
+4. 打开 `python my_devices.py` 和 `pythonw tray_app.py` 看界面和托盘图标。
+5. 有问题把第 2、3 步的输出（含 `00 b0 -> …` 这类报文）贴到 issue。
+
+## 单元测试
+
+协议解析和收发流程有单元测试，用假的 `hid_win` 模块，不需要 Windows 也不需要真机：
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## 用 prompt 做一份你自己的
+
+> 这份 prompt 是最初给 ATK 鼠标 + DARKRIM 耳机写的，作为「给新设备做适配」的方法模板保留。
 
 这套东西的价值不在代码，在**方法**。下面这段 prompt 把我做这个工具的全过程和结论都写进去了，
 交给一个**能动手的 Agent** 就能按你自己的设备重做一份。
@@ -148,7 +228,7 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 ## 五、验收标准
 
 1. `python my_devices.py --once` 能打印两行电量（鼠标 xx%、耳机 xx%）。
-2. 简洁面板里两张卡片显示正确百分比，颜色随电量变化（≥60 绿 / 30–59 黄 / <30 红）。
+2. 简洁面板里两张卡片显示正确百分比，颜色随电量变化（≥40 绿 / 11–39 黄 / <11 红）。
 3. 任务管理器 →「启动」标签里能看到「电量托盘」，可直接启用/禁用，
    且与界面里的「开机自启」勾选框状态一致。
 4. 桌面上是链接（不是副本）：指向项目目录的目录链接 + 指向启动脚本的文件链接。
@@ -169,7 +249,13 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 |---|---|
 | `hid_win.py` | HID 底层：枚举接口、Feature Report 读写、异步 Input Report、字段解析 |
 | `battery.py` | 多策略电量读取 + 厂商协议表 + 手动标定 |
-| `darkrim_proto.py` | DARKRIM 杰理方案私有协议（帧构造 / CRC / TLV 解析） |
+| `hid_common.py` | 各协议共用：hidapi 风格的补齐 / 去 Report ID、一次「发请求 + 收回复」、统一结果 `DeviceBattery` |
+| `steelseries_proto.py` | 赛睿无线耳机协议（来源见文件开头） |
+| `razer_proto.py` | 雷蛇无线耳机协议（来源见文件开头） |
+| `xiaomi_proto.py` | 小米 2.4G 鼠标：标准 HID 电量字段 + 用户标定 |
+| `devices.py` | 面板和托盘共用的读取层（三类设备 → 卡片数据） |
+| `tests/` | 单元测试（假 `hid_win`，Linux 上也能跑） |
+| `darkrim_proto.py` | DARKRIM 杰理方案私有协议（只在 `app.py` 调试版里用） |
 | `bt_battery.py` | 蓝牙耳机 HFP 电量（未公开 PnP 属性） |
 | `my_devices.py` | **主界面**（简洁面板） |
 | `tray_app.py` | 托盘程序（`Shell_NotifyIconW` + `SetTimer`，空闲几乎不占 CPU） |
@@ -197,4 +283,6 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 
 ## 说明
 
-私有协议部分是通过逆向厂商软件 + 抓包分析得到的，仅供学习与个人使用。
+雷蛇 / 赛睿协议来自上文列出的开源项目和公开抓包记录；HaloBattery 为 MIT 协议，
+HeadsetControl 为 GPL 协议，本仓库只参考了其中的协议事实（请求字节、回复偏移），没有复制代码。
+仅供学习与个人使用。

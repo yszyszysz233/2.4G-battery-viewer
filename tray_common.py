@@ -16,22 +16,38 @@ from typing import Optional
 
 import win_link
 import win_shell
+import tray_prefs as prefs
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def is_frozen() -> bool:
+    """PyInstaller / 打包后的 EXE 运行时为 True。"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def _app_dir() -> str:
+    # 打包后配置/兄弟 EXE 都放在可执行文件旁边（可写目录），
+    # 不要用 sys._MEIPASS（只读临时解压目录）。
+    if is_frozen():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = _app_dir()
 CONFIG_PATH = os.path.join(BASE_DIR, "tray_config.json")
 PID_FILE = os.path.join(BASE_DIR, "tray_pid.txt")
+
+# 打包产物里的两个入口名（与 CI / 使用说明保持一致）
+TRAY_EXE_NAME = "BatteryTray.exe"
+PANEL_EXE_NAME = "BatteryViewer.exe"
 
 APP_NAME = "DeviceBatteryTray"
 WND_CLASS = "DeviceBatteryTrayWnd"
 MUTEX_NAME = "Global\\DeviceBatteryTray_single_instance"
+UI_MUTEX_NAME = "Global\\DeviceBatteryViewer_single_instance"
 
 # 界面标题（托盘用它来找到已打开的窗口）
 UI_TITLE = "我的设备电量"
 
-DEFAULT_CONFIG = {
-    "interval": 60,        # 托盘轮询间隔（秒）
-    "autostart": True,     # 开机自启
-}
+DEFAULT_CONFIG = dict(prefs.DEFAULT_CONFIG)
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
                     (300, "5 分钟"), (600, "10 分钟"), (1800, "30 分钟")]
@@ -52,6 +68,22 @@ USER32.ShowWindow.restype = wintypes.BOOL
 USER32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
 USER32.SetForegroundWindow.restype = wintypes.BOOL
 USER32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+USER32.IsIconic.restype = wintypes.BOOL
+USER32.IsIconic.argtypes = [ctypes.c_void_p]
+USER32.IsWindowVisible.restype = wintypes.BOOL
+USER32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+
+SW_HIDE = 0
+SW_SHOW = 5
+SW_RESTORE = 9
+SW_SHOWNA = 8
+
+ERROR_ALREADY_EXISTS = 183
+
+KERNEL32.CreateMutexW.restype = ctypes.c_void_p
+KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+KERNEL32.CloseHandle.restype = wintypes.BOOL
+KERNEL32.CloseHandle.argtypes = [ctypes.c_void_p]
 
 
 # --------------------------------------------------------------------------
@@ -93,10 +125,27 @@ def pythonw_path() -> str:
 
 
 def tray_script() -> str:
+    """源码模式下的托盘脚本路径。"""
     return os.path.join(BASE_DIR, "tray_app.py")
 
 
+def tray_target() -> str:
+    """开机自启 / 启动托盘时用的目标：打包后是 EXE，否则是脚本。"""
+    if is_frozen():
+        return os.path.join(BASE_DIR, TRAY_EXE_NAME)
+    return tray_script()
+
+
+def panel_target() -> str:
+    """打开简洁界面时用的目标。"""
+    if is_frozen():
+        return os.path.join(BASE_DIR, PANEL_EXE_NAME)
+    return os.path.join(BASE_DIR, "my_devices.py")
+
+
 def autostart_command() -> str:
+    if is_frozen():
+        return f'"{tray_target()}"'
     return f'"{pythonw_path()}" "{tray_script()}"'
 
 
@@ -205,11 +254,15 @@ def set_autostart(enabled: bool) -> bool:
     能直接看到它（名字就是 电量托盘），并且可以在那里直接启用/禁用。
     """
     if enabled:
+        if is_frozen():
+            target, arguments = tray_target(), ""
+        else:
+            target, arguments = pythonw_path(), f'"{tray_script()}"'
         ok = win_shell.create_shortcut(
-            startup_lnk(), pythonw_path(),
-            arguments=f'"{tray_script()}"',
+            startup_lnk(), target,
+            arguments=arguments,
             workdir=BASE_DIR,
-            description="设备电量托盘：常驻显示 ATK 鼠标 / DARKRIM 耳机电量")
+            description="设备电量托盘：常驻显示 小米鼠标 / 雷蛇耳机 / 赛睿耳机电量")
         _set_startup_approved(True)
     else:
         _clear_startup_approved()
@@ -316,6 +369,39 @@ def ui_hwnd() -> int:
     return int(h) if h else 0
 
 
+def focus_or_show_ui() -> bool:
+    """若简洁界面已在跑：显示（含藏到托盘的）并置前台。成功返回 True。"""
+    hwnd = ui_hwnd()
+    if not hwnd:
+        return False
+    if USER32.IsIconic(hwnd) or not USER32.IsWindowVisible(hwnd):
+        USER32.ShowWindow(hwnd, SW_RESTORE)
+    else:
+        USER32.ShowWindow(hwnd, SW_SHOW)
+    USER32.SetForegroundWindow(hwnd)
+    return True
+
+
+def claim_ui_single_instance() -> tuple[bool, object]:
+    """面板进程单实例锁。
+
+    返回 (ok, handle)：
+      ok=True  → 本进程是唯一实例，调用方须保持 handle 存活到退出
+      ok=False → 已有实例，handle 可为 None；调用方应 focus 后退出
+    """
+    handle = KERNEL32.CreateMutexW(None, False, UI_MUTEX_NAME)
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        if handle:
+            KERNEL32.CloseHandle(handle)
+        return False, None
+    return True, handle
+
+
+def activate_existing_ui() -> bool:
+    """第二实例启动时：把已有面板拉到前台（含 withdraw 隐藏态）。"""
+    return focus_or_show_ui()
+
+
 def start_tray_app(wait_timeout: float = 6.0) -> bool:
     """启动托盘程序；返回托盘窗口是否真的起来了。
 
@@ -327,8 +413,11 @@ def start_tray_app(wait_timeout: float = 6.0) -> bool:
         return True
     cleanup_zombie()
     try:
-        subprocess.Popen([pythonw_path(), os.path.join(BASE_DIR, "tray_app.py")],
-                         cwd=BASE_DIR, creationflags=0x00000008)
+        if is_frozen():
+            cmd = [tray_target()]
+        else:
+            cmd = [pythonw_path(), tray_script()]
+        subprocess.Popen(cmd, cwd=BASE_DIR, creationflags=0x00000008)
     except Exception:
         return False
     return wait_for_tray(wait_timeout)
