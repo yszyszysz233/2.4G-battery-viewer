@@ -39,6 +39,7 @@ from typing import Optional
 import hid_win as hw
 import battery as bt
 import darkrim_proto as drp
+import mchose_proto as mcp
 import win_icon
 import tray_common as tc
 
@@ -158,6 +159,7 @@ TRAY_ICONS = [
     # (uID, key, 提示名, 是否带底板)
     (1, "mouse", "ATK 鼠标", False),
     (2, "headset", "DARKRIM 耳机", True),
+    (3, "keyboard", "MCHOSE G87", False),
 ]
 
 
@@ -189,6 +191,15 @@ def read_mouse() -> tuple[Optional[int], str]:
 
 def read_headset() -> tuple[Optional[int], str]:
     return drp.read_battery_only(timeout=0.4)
+
+
+def read_keyboard() -> tuple[Optional[int], str]:
+    level, err, charge = mcp.read_battery_only(timeout=0.4)
+    if level is None:
+        return None, err
+    # 充电中时数字后面没法带字，放在 tooltip 的错误字段里也显示不出来，
+    # 这里就不占用 err —— 充电状态在简洁面板上看
+    return level, ""
 
 
 # --------------------------------------------------------------------------
@@ -305,6 +316,7 @@ class TrayApp:
         try:
             self.levels["mouse"] = read_mouse()
             self.levels["headset"] = read_headset()
+            self.levels["keyboard"] = read_keyboard()
         except Exception:
             self.log("读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
@@ -312,7 +324,9 @@ class TrayApp:
     def on_refresh_done(self) -> None:
         self.busy = False
         m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
+        k = self.levels.get("keyboard", (None, ""))
+        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）"
+                 f" 键盘={k[0]}（{k[1] or 'ok'}）")
         self.update_icons()
 
     # ---- 打开简洁界面 ---------------------------------------------------

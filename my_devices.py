@@ -22,6 +22,7 @@ from typing import Optional
 import hid_win as hw
 import battery as bt
 import darkrim_proto as drp
+import mchose_proto as mcp
 import tray_common as tc
 import win_link
 from hid_win import HidInterface
@@ -108,8 +109,43 @@ def read_darkrim() -> Reading:
     return r
 
 
+def read_mchose() -> Reading:
+    """MCHOSE G87 无线键盘（逆向官方网页驱动的私有协议）。"""
+    r = Reading("MCHOSE G87", "未连接")
+    try:
+        info = mcp.read_info(timeout=0.5)
+    except Exception as e:
+        r.error = f"读取出错：{e}"
+        return r
+    if info.error:
+        r.error = info.error
+        return r
+    conn = mcp.CONNECT_TEXT.get(info.connect_mode, "未知")
+    r.subtitle = f"41E4:2001 · {conn}"
+    r.level = info.battery
+    r.status = info.charge_text
+    r.detail = "私有 HID 协议（cmd 0x4A = 电量）"
+    bits = [f"连接 {conn}"]
+    if info.charge_state is not None:
+        bits.append(f"状态字节 0x{info.charge_state:02X}")
+    if info.detail:
+        bits.append(info.detail)
+    r.extra = " · ".join(bits)
+    if r.level is None and not r.error:
+        r.error = "键盘没有上报电量（键盘已休眠或关机）"
+    return r
+
+
+# 主程序卡片列表/顺序，改这里就能增删设备
+DEVICES = [
+    ("ATK 鼠标", read_atk),
+    ("DARKRIM 耳机", read_darkrim),
+    ("MCHOSE G87", read_mchose),
+]
+
+
 def read_all() -> list[Reading]:
-    return [read_atk(), read_darkrim()]
+    return [reader() for _, reader in DEVICES]
 
 
 # ==========================================================================
@@ -266,14 +302,17 @@ def build_ui():
     # ---- 卡片 ----
     body = ttk.Frame(root, padding=(18, 4, 18, 4))
     body.pack(fill="both", expand=True)
-    body.columnconfigure(0, weight=1, uniform="card")
-    body.columnconfigure(1, weight=1, uniform="card")
+    for i in range(len(DEVICES)):
+        body.columnconfigure(i, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
 
-    card_atk = DeviceCard(body, "ATK 鼠标")
-    card_atk.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    card_dr = DeviceCard(body, "DARKRIM 耳机")
-    card_dr.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    cards: list[DeviceCard] = []
+    last = len(DEVICES) - 1
+    for i, (title, _reader) in enumerate(DEVICES):
+        card = DeviceCard(body, title)
+        card.frame.grid(row=0, column=i, sticky="nsew",
+                        padx=(0 if i == 0 else 8, 0 if i == last else 8))
+        cards.append(card)
 
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
     foot.pack(fill="x", side="bottom")
@@ -411,11 +450,11 @@ def build_ui():
 
     # ---- 刷新逻辑 ----
     def apply(readings: list[Reading]):
-        card_atk.update(readings[0])
-        card_dr.update(readings[1])
+        for card, r in zip(cards, readings):
+            card.update(r)
         ok = sum(1 for r in readings if r.ok)
         foot.configure(text=f"更新于 {time.strftime('%H:%M:%S')}   "
-                            f"成功读取 {ok}/2 个设备"
+                            f"成功读取 {ok}/{len(DEVICES)} 个设备"
                             + ("" if state["auto"] else "   （自动刷新已关闭）"))
         state["busy"] = False
         btn.configure(state="normal")
@@ -425,8 +464,8 @@ def build_ui():
             readings = read_all()
         except Exception:
             traceback.print_exc()
-            readings = [Reading("ATK 鼠标", "", error="读取异常"),
-                        Reading("DARKRIM 耳机", "", error="读取异常")]
+            readings = [Reading(title, "", error="读取异常")
+                        for title, _ in DEVICES]
         results.put(("readings", readings))
 
     def refresh():
