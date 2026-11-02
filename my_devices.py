@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""我的设备电量 —— 只显示 ATK 鼠标 + DARKRIM 耳机的简洁面板
+"""我的设备电量 —— 自动显示已适配的鼠标和键盘 / 耳机
 
 用法：
     python my_devices.py            打开界面（默认自动刷新）
     python my_devices.py --once     命令行读一次就退出
 
 界面只有两块卡片，各显示一个设备的电量，可自动刷新。
-底层复用 battery.py / darkrim_proto.py 里已经验证过的协议。
+面板和托盘共用 device_readers.py，底层协议位于 battery.py。
 """
 
 from __future__ import annotations
@@ -16,100 +16,11 @@ import queue
 import threading
 import time
 import traceback
-from dataclasses import dataclass
 from typing import Optional
 
-import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
 import tray_common as tc
 import win_link
-from hid_win import HidInterface
-
-
-# ==========================================================================
-# 读取层
-# ==========================================================================
-@dataclass
-class Reading:
-    title: str
-    subtitle: str
-    level: Optional[int] = None
-    status: str = ""
-    detail: str = ""
-    error: str = ""
-    extra: str = ""
-
-    @property
-    def ok(self) -> bool:
-        return self.level is not None
-
-
-def _find(vid: int, usage_page: int, output_len: int = 0) -> Optional[HidInterface]:
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
-
-
-def read_atk() -> Reading:
-    """ATK / VXE 无线鼠标（内置协议 2）。"""
-    r = Reading("ATK 鼠标", "无接收器")
-    iface = _find(0x373B, 0xFF05, 64) or _find(0x373B, 0xFF02)
-    if iface is None:
-        r.error = "没找到接收器（请把 2.4G 接收器插上）"
-        return r
-    r.subtitle = f"{iface.vid_pid} · {iface.product or '2.4G 接收器'}"
-    try:
-        res = bt.strategy_vendor_protocol(iface) or bt.strategy_standard_battery_usage(iface)
-    except Exception as e:
-        r.error = f"读取出错：{e}"
-        return r
-    if res is None:
-        r.error = "这台设备没有可用的读取方式"
-        return r
-    if res.ok:
-        r.level = res.level
-        r.status = res.status_text
-        r.detail = res.source
-    else:
-        r.error = res.detail or "读取失败"
-    return r
-
-
-def read_darkrim() -> Reading:
-    """DARKRIM SHADOW 耳机（杰理方案 dongle，逆向协议）。"""
-    r = Reading("DARKRIM 耳机", "未连接")
-    try:
-        info = drp.read_info(timeout=0.35)
-    except Exception as e:
-        r.error = f"读取出错：{e}"
-        return r
-    if not info.online:
-        r.error = info.detail or "没找到 dongle"
-        return r
-    r.subtitle = f"3654:6901 · {info.name or 'DARKRIM'}"
-    r.level = info.battery
-    r.status = ""
-    r.detail = "私有 TLV 协议（TLV 0x01 = 电量）"
-    bits = []
-    if info.dongle_firmware:
-        bits.append(f"dongle 固件 {info.dongle_firmware}")
-    if info.headset_firmware:
-        bits.append(f"耳机固件 {info.headset_firmware}")
-    if info.address:
-        bits.append(f"地址 {info.address}")
-    if info.status_code is not None:
-        bits.append(f"状态码 {info.status_code}")
-    r.extra = " · ".join(bits)
-    if r.level is None and not r.error:
-        r.error = "耳机没有上报电量（请确认耳机已开机并连上）"
-    return r
-
-
-def read_all() -> list[Reading]:
-    return [read_atk(), read_darkrim()]
+from device_readers import Reading, read_all, MOUSE_TITLE, KEYBOARD_TITLE
 
 
 # ==========================================================================
@@ -118,7 +29,7 @@ def read_all() -> list[Reading]:
 def cli_once() -> None:
     for r in read_all():
         if r.ok:
-            print(f"{r.title}: {r.level}%   {r.detail}")
+            print(f"{r.title}: {r.display_level}   {r.status}   {r.detail}")
             if r.extra:
                 print(f"    {r.extra}")
         else:
@@ -181,9 +92,10 @@ class DeviceCard:
         self.lab_extra.pack(anchor="w", pady=(4, 0))
 
     def update(self, r: Reading) -> None:
+        self.lab_title.configure(text=r.title)
         self.lab_sub.configure(text=r.subtitle)
         if r.ok:
-            self.lab_level.configure(text=f"{r.level}%",
+            self.lab_level.configure(text=r.display_level,
                                      foreground=level_color(r.level))
             st = r.status if r.status not in ("未知", "状态未知") else ""
             self.lab_status.configure(text=st)
@@ -270,10 +182,10 @@ def build_ui():
     body.columnconfigure(1, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
 
-    card_atk = DeviceCard(body, "ATK 鼠标")
-    card_atk.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    card_dr = DeviceCard(body, "DARKRIM 耳机")
-    card_dr.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    card_mouse = DeviceCard(body, "鼠标")
+    card_mouse.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    card_keyboard = DeviceCard(body, "键盘 / 耳机")
+    card_keyboard.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
     foot.pack(fill="x", side="bottom")
@@ -411,8 +323,8 @@ def build_ui():
 
     # ---- 刷新逻辑 ----
     def apply(readings: list[Reading]):
-        card_atk.update(readings[0])
-        card_dr.update(readings[1])
+        card_mouse.update(readings[0])
+        card_keyboard.update(readings[1])
         ok = sum(1 for r in readings if r.ok)
         foot.configure(text=f"更新于 {time.strftime('%H:%M:%S')}   "
                             f"成功读取 {ok}/2 个设备"
@@ -425,8 +337,8 @@ def build_ui():
             readings = read_all()
         except Exception:
             traceback.print_exc()
-            readings = [Reading("ATK 鼠标", "", error="读取异常"),
-                        Reading("DARKRIM 耳机", "", error="读取异常")]
+            readings = [Reading(MOUSE_TITLE, "", error="读取异常"),
+                        Reading(KEYBOARD_TITLE, "", error="读取异常")]
         results.put(("readings", readings))
 
     def refresh():
@@ -434,7 +346,7 @@ def build_ui():
             return
         state["busy"] = True
         btn.configure(state="disabled")
-        foot.configure(text="正在读取…（耳机的协议要几秒钟）")
+        foot.configure(text="正在读取设备电量…")
         threading.Thread(target=worker, daemon=True).start()
 
     def _reschedule():

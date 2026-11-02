@@ -3,7 +3,8 @@
 
 界面约定
 --------
-* 通知区域两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）。
+* 通知区域两个图标：鼠标（纯数字）、键盘 / 耳机（数字带深色底板）。
+  自动识别毒蝰 V2 Pro / 狼蛛 F87 Pro，兼容原 ATK / DARKRIM 组合。
   图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
 * **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
 * 左键图标 → 立刻刷新一次。
@@ -37,8 +38,7 @@ from ctypes import wintypes
 from typing import Optional
 
 import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import device_readers as devices
 import win_icon
 import tray_common as tc
 
@@ -156,39 +156,9 @@ KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
 
 TRAY_ICONS = [
     # (uID, key, 提示名, 是否带底板)
-    (1, "mouse", "ATK 鼠标", False),
-    (2, "headset", "DARKRIM 耳机", True),
+    (1, "mouse", devices.MOUSE_TITLE, False),
+    (2, "keyboard", devices.KEYBOARD_TITLE, True),
 ]
-
-
-# --------------------------------------------------------------------------
-# 设备读取（轻量版）
-# --------------------------------------------------------------------------
-def _find_iface(vid: int, usage_page: int, output_len: int = 0):
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
-
-
-def read_mouse() -> tuple[Optional[int], str]:
-    iface = _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02)
-    if iface is None:
-        return None, "没找到接收器"
-    try:
-        res = bt.strategy_vendor_protocol(iface)
-    except Exception as e:
-        return None, f"读取失败：{e}"
-    if res is None:
-        return None, "没有可用的读取方式"
-    if res.ok:
-        return res.level, ""
-    return None, res.detail or "无回复（动一下鼠标）"
-
-
-def read_headset() -> tuple[Optional[int], str]:
-    return drp.read_battery_only(timeout=0.4)
 
 
 # --------------------------------------------------------------------------
@@ -201,7 +171,8 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
-        self.levels = {k: (None, "正在读取…") for _, k, _, _ in TRAY_ICONS}
+        self.levels = {k: devices.Reading(title, "", error="正在读取…")
+                       for _, k, title, _ in TRAY_ICONS}
         self.icons_added = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
@@ -240,12 +211,15 @@ class TrayApp:
 
     def _apply_icon(self, action: int, uID: int, key: str, title: str,
                     plate: bool) -> bool:
-        level, err = self.levels[key]
-        text = str(level) if level is not None else "--"
+        reading = self.levels[key]
+        title = reading.title
+        text = str(reading.level) if reading.level is not None else "+" if reading.ok else "--"
+        color = (79, 140, 255) if reading.ok and reading.level is None else self._color(reading.level)
         nid = self._nid(uID)
-        nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
-        nid.szTip = (f"{title}：{level}%（{time.strftime('%H:%M:%S')} 更新）"
-                     if level is not None else f"{title}：{err or '未知'}")
+        nid.hIcon = win_icon.make_hicon(text, color, plate)
+        nid.szTip = ((f"{title}：{reading.display_level} {reading.status}"
+                      f"（{time.strftime('%H:%M:%S')} 更新）")
+                     if reading.ok else f"{title}：{reading.error or '未知'}")
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
     def add_icons(self) -> None:
@@ -303,16 +277,19 @@ class TrayApp:
 
     def _worker(self, hwnd: int) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
+            readings = devices.read_all()
+            self.levels = {key: reading for (_, key, _, _), reading in zip(TRAY_ICONS, readings)}
         except Exception:
             self.log("读取异常:\n" + traceback.format_exc())
+            self.levels = {key: devices.Reading(title, "", error="读取异常，请重试")
+                           for _, key, title, _ in TRAY_ICONS}
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
+        self.log("刷新完成：" + "；".join(
+            f"{self.levels[key].title}={self.levels[key].display_level} {self.levels[key].error}"
+            for _, key, title, _ in TRAY_ICONS))
         self.update_icons()
 
     # ---- 打开简洁界面 ---------------------------------------------------

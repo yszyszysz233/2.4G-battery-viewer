@@ -48,7 +48,7 @@ def cli_list() -> None:
 
 def cli_battery(listen: float = 3.0) -> None:
     devs = [d for d in hw.enumerate_hid()
-            if d.is_vendor_page or d.num_feature_value_caps or d.num_input_value_caps]
+            if d.is_vendor_page or d.feature_len or d.num_input_value_caps]
     print(f"检查 {len(devs)} 个候选接口……\n")
     for d in devs:
         attempts = bt.read_battery(d, listen_seconds=listen)
@@ -527,7 +527,7 @@ def build_ui():
                 f"0x{d.usage_page:04X}", f"0x{d.usage:04X}",
                 d.input_len, d.output_len, d.feature_len,
                 f"{d.num_input_value_caps}/{d.num_feature_value_caps}",
-                ("系统独占，无法发送指令" if d.reserved else "") + (d.error or ""),
+                ("系统独占，可通过 Feature Report 查询" if d.reserved else "") + (d.error or ""),
             ))
         first = ifaces[0]
         lab_dev.configure(text=f"{first.display_name}   ({first.vid_pid})")
@@ -612,7 +612,11 @@ def build_ui():
 
         # 优先尝试：厂商接口 → 有值能力表的接口 → 其它可读接口
         def rank(d: HidInterface):
-            return (0 if d.is_vendor_page else 1,
+            local = ((d.vid == 0x1532 and d.pid in bt.RAZER_VIPER_PIDS and d.feature_len == 91)
+                     or ((d.vid, d.pid, d.usage_page, d.usage, d.input_len, d.output_len) ==
+                         (bt.AULA_VID, bt.AULA_PID, 0xFF02, 2, 20, 20)))
+            return (0 if local else 1,
+                    0 if d.is_vendor_page else 1,
                     0 if (d.num_feature_value_caps or d.num_input_value_caps) else 1,
                     1 if d.reserved else 0)
 
@@ -631,8 +635,9 @@ def build_ui():
                 for a in attempts:
                     mark = "命中 ✔" if a.ok else "未命中"
                     log.append(f"    [{mark}] {a.source}：{a.detail}")
-                if attempts and attempts[0].ok:
-                    best = attempts[0]
+                candidate = bt.best_result(attempts)
+                if candidate and candidate.ok:
+                    best = candidate
                     break
             return best, log
 
@@ -651,7 +656,7 @@ def build_ui():
                         vals[3] = f"{best.level}%"
                         tree.item(sel[0], values=vals)
             elif best and best.ok:
-                lab_level.configure(text="电压模式")
+                lab_level.configure(text=best.status_text if best.status == "charging" else "电压模式")
                 lab_status.configure(text=f"{best.detail}   来源：{best.source}")
             else:
                 lab_level.configure(text="未知")
