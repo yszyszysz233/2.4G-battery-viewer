@@ -153,7 +153,7 @@ def query(dev: HidDevice, seq: int, tlv_type: int, ch: int = CH_LOCAL,
         if not r:
             continue
         f = parse_frame(r)
-        if f and f.seq == (seq & 0xFF):
+        if f and f.crc_ok and f.seq == (seq & 0xFF):
             frames.append(f)
     return frames
 

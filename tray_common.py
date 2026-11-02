@@ -209,7 +209,7 @@ def set_autostart(enabled: bool) -> bool:
             startup_lnk(), pythonw_path(),
             arguments=f'"{tray_script()}"',
             workdir=BASE_DIR,
-            description="设备电量托盘：常驻显示 ATK 鼠标 / DARKRIM 耳机电量")
+            description="设备电量托盘：常驻显示已适配的鼠标、键盘或耳机电量")
         _set_startup_approved(True)
     else:
         _clear_startup_approved()

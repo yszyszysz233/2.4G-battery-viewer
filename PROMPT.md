@@ -1,5 +1,8 @@
 # 可复用 Prompt：Windows 2.4G 外设电量小工具
 
+> 本文件保留原项目的 ATK / DARKRIM 示例。雷蛇毒蝰 V2 Pro 和狼蛛 F87 Pro 的
+> 新增适配说明见 [LOCAL_DEVICES.md](LOCAL_DEVICES.md)。
+
 > 用法：把下面「=== 提示词开始 ===」到「=== 提示词结束 ===」之间的内容整段复制，
 > 粘给一个**能执行命令、读写文件的 Agent**（WorkBuddy / CodeBuddy / Cursor / Claude Code 等），
 > 即可从零复刻这个工具。**纯聊天窗口不够**——枚举 HID、抓包、爆破 CRC 都得真跑起来。

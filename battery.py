@@ -280,6 +280,128 @@ def strategy_darkrim(iface: HidInterface) -> Optional[BatteryResult]:
 
 
 # --------------------------------------------------------------------------
+# 本机设备：雷蛇毒蝰 V2 Pro / 狼蛛 F87 Pro
+# 协议参考（独立实现，仅发送电量/充电状态查询）：
+# https://github.com/openrazer/openrazer
+# https://github.com/RadianceADM/aula-f87-control/blob/main/aula_f87/device.py
+# --------------------------------------------------------------------------
+RAZER_VIPER_PIDS = (0x00A5, 0x00A6)  # 有线 / 原装 2.4G 接收器
+AULA_VID, AULA_PID = 0x3554, 0xFA09
+
+
+def _razer_request(command: int) -> bytes:
+    report = bytearray(91)  # Report ID 0 + 90 字节 Razer 报文
+    report[2] = 0x1F       # transaction id
+    report[6:9] = bytes((2, 0x07, command))
+    for value in report[3:89]:
+        report[89] ^= value
+    return bytes(report)
+
+
+def _razer_query(dev: HidDevice, command: int, timeout: float = 0.6) -> bytes:
+    dev.set_feature_report(_razer_request(command))
+    deadline = time.monotonic() + timeout
+    reason = "鼠标没有回复（请移动鼠标唤醒，或检查雷云是否占用接口）"
+    while time.monotonic() < deadline:
+        time.sleep(0.04)
+        report = dev.get_feature_report(0, 91)
+        if (len(report) != 91 or report[0] != 0 or report[2] != 0x1F
+                or report[6:9] != bytes((2, 0x07, command))):
+            reason = "鼠标回复与电量查询不匹配（可能有其它驱动同时查询）"
+            continue
+        checksum = 0
+        for value in report[3:89]:
+            checksum ^= value
+        if checksum != report[89]:
+            reason = "鼠标回复校验失败，请重试"
+            continue
+        status = report[1]
+        if status == 0x02:
+            return report
+        if status == 0x01:
+            continue  # busy，等待同一请求完成
+        if status == 0x04:
+            raise HidError("鼠标未连接或正在休眠，请移动鼠标后重试")
+        raise HidError(f"鼠标拒绝查询（状态 0x{status:02X}）")
+    raise HidError(reason)
+
+
+def strategy_razer_viper(iface: HidInterface) -> Optional[BatteryResult]:
+    if (iface.vid != 0x1532 or iface.pid not in RAZER_VIPER_PIDS
+            or iface.feature_len != 91):
+        return None
+    source = "雷蛇电量协议"
+    try:
+        with hw.query_lock(iface.vid, iface.pid), HidDevice(iface.path) as dev:
+            report = _razer_query(dev, 0x80)
+            status = "unknown"
+            note = ""
+            try:
+                charging = _razer_query(dev, 0x84)[10]
+                if charging in (0, 1):
+                    status = "charging" if charging else "discharging"
+            except HidError as exc:
+                note = f"；充电状态暂不可用：{exc}"
+        raw = report[10]
+        return BatteryResult(
+            ok=True, level=round(raw * 100 / 255), raw_level=raw, status=status,
+            source=source, detail=f"Razer 0x07:0x80，原始电量 {raw}/255" + note,
+            raw=report,
+        )
+    except OSError as exc:
+        return BatteryResult(ok=False, source=source, detail=f"读取失败：{exc}")
+
+
+def _aula_request() -> bytes:
+    report = bytearray(20)
+    report[:2] = bytes((0x13, 0x4A))
+    report[19] = sum(report[:19]) & 0xFF
+    return bytes(report)
+
+
+def _parse_aula_battery(report: bytes) -> Optional[BatteryResult]:
+    if (len(report) != 20 or report[0] != 0x13 or report[1] & 0x7F != 0x4A
+            or report[2:5] != bytes((1, 0, 2))
+            or sum(report[:19]) & 0xFF != report[19]):
+        return None
+    raw, state = report[5:7]
+    if state not in (0x01, 0x10) or raw > 100:
+        return None
+    charging = state == 0x10
+    notice = "充电时设备不提供实际百分比" if charging else ""
+    return BatteryResult(
+        ok=True, level=None if charging else raw, raw_level=raw,
+        status="charging" if charging else "discharging", source="狼蛛 2.4G 电量协议",
+        detail=f"Report 0x13，命令 0x4A，状态 0x{state:02X}" + (f"；{notice}" if notice else ""),
+        raw=report, extra={"notice": notice},
+    )
+
+
+def strategy_aula_f87(iface: HidInterface) -> Optional[BatteryResult]:
+    if ((iface.vid, iface.pid, iface.usage_page, iface.usage) !=
+            (AULA_VID, AULA_PID, 0xFF02, 0x0002)
+            or iface.input_len != 20 or iface.output_len != 20):
+        return None
+    source = "狼蛛 2.4G 电量协议"
+    try:
+        with hw.query_lock(iface.vid, iface.pid), HidDevice(iface.path, write=True) as dev:
+            for _ in range(2):  # 第一次请求也用于唤醒接收器
+                dev.drain()    # 提前打开独立读句柄，避免错过很快到来的回复
+                dev.write_output(_aula_request())
+                deadline = time.monotonic() + 0.7
+                while time.monotonic() < deadline:
+                    remaining = max(1, int((deadline - time.monotonic()) * 1000))
+                    report = dev.read_input(timeout_ms=min(150, remaining))
+                    result = _parse_aula_battery(report) if report else None
+                    if result is not None:
+                        return result
+        return BatteryResult(ok=False, source=source,
+                             detail="键盘没有有效回复，请确认处于 2.4G 模式并按键唤醒")
+    except OSError as exc:
+        return BatteryResult(ok=False, source=source, detail=f"读取失败：{exc}")
+
+
+# --------------------------------------------------------------------------
 # 策略 B / D：厂商协议（含用户自定义）
 # --------------------------------------------------------------------------
 def _matches(report: bytes, expect: tuple) -> bool:
@@ -318,6 +440,8 @@ def _read_report_after_request(dev: HidDevice, spec: ProtocolSpec,
             last = r
             if not spec.expect or _matches(r, spec.expect):
                 return r
+    if last and spec.expect:
+        raise HidError("设备回复未通过协议校验")
     return last
 
 
@@ -356,6 +480,9 @@ def _parse_spec_response(spec: ProtocolSpec, report: bytes, iface: HidInterface,
 
 
 def strategy_vendor_protocol(iface: HidInterface) -> Optional[BatteryResult]:
+    # 3554 也用于 VXE 鼠标，但 FA09 是狼蛛键盘接收器，不能套用鼠标协议。
+    if (iface.vid, iface.pid) == (AULA_VID, AULA_PID):
+        return None
     specs = [s for s in all_protocols()
              if s.vid == iface.vid and s.usage_page == iface.usage_page]
     if not specs:
@@ -672,6 +799,8 @@ def read_battery(iface: HidInterface, listen_seconds: float = 3.0,
     """按顺序跑所有策略，返回所有尝试记录（第一条 ok=True 的是结论）。"""
     attempts: list[BatteryResult] = []
     steps = [
+        ("雷蛇毒蝰 V2 Pro", lambda: strategy_razer_viper(iface)),
+        ("狼蛛 F87 Pro", lambda: strategy_aula_f87(iface)),
         ("标准 HID 电量字段", lambda: strategy_standard_battery_usage(iface)),
         ("DARKRIM 私有协议", lambda: strategy_darkrim(iface)),
         ("厂商协议", lambda: strategy_vendor_protocol(iface)),

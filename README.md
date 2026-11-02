@@ -3,17 +3,25 @@
 Windows 上读取 2.4G 无线外设电量的小工具。**纯 ctypes 调系统 DLL，零第三方依赖**——
 不用 hidapi、不用 pystray、不用 Pillow、不用 pywin32，装了 Python 就能跑。
 
-## ⚠️ 只支持这两台设备
+## 支持的设备
 
-这**不是一个通用工具**。协议是逆向我们这两台具体设备得到的——换成别的鼠标或耳机，
-大概率一个字节都读不出来（界面会显示「没有可用的读取方式」）。
+简洁面板和托盘会自动选择已连接的受支持设备：鼠标优先毒蝰 V2 Pro，否则使用
+原 ATK 鼠标；第二张卡片优先狼蛛 F87 Pro，否则使用原 DARKRIM 耳机，也可混用。
+这**不是一个通用工具**；其它型号需要单独确认接口和协议。
 
 | 设备 | VID:PID | 读取方式 |
 |---|---|---|
-| ATK / VXE 无线鼠标 | `373B:1216` | usage page `0xFF05`，Report ID `0x08`，请求 `7D 72 02 00 01 07 01`，电量取回复第 7 字节 |
-| DARKRIM SHADOW 耳机（杰理方案 dongle） | `3654:6901` | 私有 TLV 协议：`CRC16-CCITT-FALSE` over `帧[1:10+len]`（大端），TLV `0x01` 即电量 |
+| 雷蛇 毒蝰 V2 Pro | `1532:00A6`（2.4G）、`1532:00A5`（有线） | 91 字节 Feature Report；电量 `0x07:0x80`、充电状态 `0x07:0x84`，原始电量 0–255 换算为百分比 |
+| 狼蛛 F87 Pro | `3554:FA09`（2.4G） | usage `0xFF02:0x0002`；20 字节 Output/Input Report `0x13`，只读电量命令 `0x4A` |
+| ATK / VXE 无线鼠标（原有支持） | `373B:1216` | usage page `0xFF05`；Report ID `0x08`，请求 `7D 72 02 00 01 07 01`，电量取回复下标 7 |
+| DARKRIM SHADOW 耳机（原有支持） | `3654:6901` | 私有 TLV 协议，CRC16-CCITT-FALSE，TLV `0x01` 为电量 |
 
-**你的设备不在这两行里？** 别硬改这个仓库，往下看「用 prompt 做一份你自己的」。
+本机实测的是两台设备的 **2.4G 接收器**。毒蝰的有线 ID 使用同一协议，尚未在本机切线验证。
+狼蛛充电时固件可能固定返回 100，因此显示「充电中」，不把该值当作真实百分比；
+托盘用蓝色 `+` 表示这种状态。未连接、休眠和回复校验失败会显示明确提示。
+协议、原始报文和验证方式见 [LOCAL_DEVICES.md](LOCAL_DEVICES.md)。
+
+**你的设备不在表中？** 往下看「用 prompt 做一份你自己的」，先确认真实协议。
 
 ## 使用方法
 
@@ -24,9 +32,14 @@ python my_devices.py
 面板里会显示两台设备的电量，默认自动刷新，底部可以改刷新间隔。
 
 - 只想看一眼：`python my_devices.py --once` —— 打印后退出
+- 托盘常驻：`pythonw tray_app.py`，鼠标图标为纯数字，键盘 / 耳机图标带深色底板
+- 也可双击 `我的设备电量.bat` 或 `电量托盘.bat`（需 Python 已加入 PATH）
 - 想摸新设备的协议：`python app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
 
 ## 用 prompt 做一份你自己的
+
+以下折叠内容及 `PROMPT.md` 保留原项目的 ATK / DARKRIM 复刻示例；
+新增型号的支持范围以本文顶部及 `LOCAL_DEVICES.md` 为准。
 
 这套东西的价值不在代码，在**方法**。下面这段 prompt 把我做这个工具的全过程和结论都写进去了，
 交给一个**能动手的 Agent** 就能按你自己的设备重做一份。
@@ -169,6 +182,7 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 |---|---|
 | `hid_win.py` | HID 底层：枚举接口、Feature Report 读写、异步 Input Report、字段解析 |
 | `battery.py` | 多策略电量读取 + 厂商协议表 + 手动标定 |
+| `device_readers.py` | 本机鼠标 / 键盘的统一读取入口，面板与托盘共用 |
 | `darkrim_proto.py` | DARKRIM 杰理方案私有协议（帧构造 / CRC / TLV 解析） |
 | `bt_battery.py` | 蓝牙耳机 HFP 电量（未公开 PnP 属性） |
 | `my_devices.py` | **主界面**（简洁面板） |
@@ -179,6 +193,8 @@ prompt 里已经写好了硬性约束、协议模板、7 条会踩的坑和验�
 | `win_shell.py` | 已知文件夹路径 + 用 ctypes COM 创建 `.lnk` |
 | `app.py` | 完整调试版界面 |
 | `PROMPT.md` | 把整个项目整理成一份可复用的提示词 |
+| `LOCAL_DEVICES.md` | 毒蝰 V2 Pro / 狼蛛 F87 Pro 的本地适配协议与验证记录 |
+| `tests/test_device_battery.py` | 无需连接设备的协议与异常状态回归测试 |
 
 ## 两个值得一提的实现细节
 

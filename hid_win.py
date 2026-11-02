@@ -23,6 +23,7 @@ from __future__ import annotations
 import ctypes
 import sys
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
@@ -280,6 +281,10 @@ kernel32.ResetEvent.restype = wintypes.BOOL
 kernel32.ResetEvent.argtypes = [ctypes.c_void_p]
 kernel32.WaitForSingleObject.restype = wintypes.DWORD
 kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+kernel32.CreateMutexW.restype = ctypes.c_void_p
+kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.ReleaseMutex.restype = wintypes.BOOL
+kernel32.ReleaseMutex.argtypes = [ctypes.c_void_p]
 kernel32.GetOverlappedResult.restype = wintypes.BOOL
 kernel32.GetOverlappedResult.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
@@ -551,11 +556,29 @@ class HidError(OSError):
     pass
 
 
+@contextmanager
+def query_lock(vid: int, pid: int, timeout_ms: int = 3000):
+    """让面板、托盘和命令行依次查询同一接收器，避免互相取走回复。"""
+    mutex = kernel32.CreateMutexW(None, False, f"Local\\DeviceBatteryQuery_{vid:04X}_{pid:04X}")
+    if not mutex:
+        raise HidError("无法创建设备查询锁")
+    acquired = False
+    try:
+        acquired = kernel32.WaitForSingleObject(mutex, timeout_ms) in (WAIT_OBJECT_0, 0x80)
+        if not acquired:
+            raise HidError("设备正在被另一个电量查询占用，请稍后重试")
+        yield
+    finally:
+        if acquired:
+            kernel32.ReleaseMutex(mutex)
+        kernel32.CloseHandle(mutex)
+
+
 class HidDevice:
     """一个已打开的 HID 接口句柄。
 
     默认用 0 访问权限打开（可读属性/能力表/Feature Report，
-    即使设备被系统独占）。需要发数据时传 readonly=False。
+    即使设备被系统独占）。需要发送 Output Report 时传 write=True。
     """
 
     def __init__(self, path: str, write: bool = False):
@@ -648,8 +671,8 @@ class HidDevice:
         return buf.raw
 
     def set_feature_report(self, data: bytes) -> None:
-        if not self.write_access:
-            raise HidError("当前句柄没有写权限，无法发送 Feature Report")
+        # Feature IOCTL 可用于零访问权限句柄；雷蛇把命令放在系统独占的鼠标集合上。
+        # Output Report / WriteFile 仍必须有读写权限，由 write_output 单独检查。
         buf = ctypes.create_string_buffer(bytes(data), len(data))
         if not hid.HidD_SetFeature(self.handle, buf, len(data)):
             raise HidError(f"写 Feature Report 失败 (err={ctypes.get_last_error()})")
@@ -774,4 +797,5 @@ __all__ = [
     "HIDP_VALUE_CAPS", "HIDP_CAPS", "HidP_Input", "HidP_Output", "HidP_Feature",
     "BATTERY_USAGES", "SYSTEM_RESERVED_USAGES", "physical_group_key",
     "pick_device_name",
+    "query_lock",
 ]
