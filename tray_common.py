@@ -26,7 +26,7 @@ WND_CLASS = "DeviceBatteryTrayWnd"
 MUTEX_NAME = "Global\\DeviceBatteryTray_single_instance"
 
 # 界面标题（托盘用它来找到已打开的窗口）
-UI_TITLE = "我的设备电量"
+UI_TITLE = "罗技 G304 电量"
 
 DEFAULT_CONFIG = {
     "interval": 60,        # 托盘轮询间隔（秒）
@@ -209,7 +209,7 @@ def set_autostart(enabled: bool) -> bool:
             startup_lnk(), pythonw_path(),
             arguments=f'"{tray_script()}"',
             workdir=BASE_DIR,
-            description="设备电量托盘：常驻显示 ATK 鼠标 / DARKRIM 耳机电量")
+            description="设备电量托盘：常驻显示罗技 G304 电量")
         _set_startup_approved(True)
     else:
         _clear_startup_approved()

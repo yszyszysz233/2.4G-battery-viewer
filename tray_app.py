@@ -3,7 +3,7 @@
 
 界面约定
 --------
-* 通知区域两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）。
+* 通知区域一个图标：罗技 G304 的电量数字。
   图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
 * **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
 * 左键图标 → 立刻刷新一次。
@@ -37,8 +37,7 @@ from ctypes import wintypes
 from typing import Optional
 
 import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import g304
 import win_icon
 import tray_common as tc
 
@@ -156,39 +155,21 @@ KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
 
 TRAY_ICONS = [
     # (uID, key, 提示名, 是否带底板)
-    (1, "mouse", "ATK 鼠标", False),
-    (2, "headset", "DARKRIM 耳机", True),
+    (1, "g304", "罗技 G304", False),
 ]
 
 
 # --------------------------------------------------------------------------
 # 设备读取（轻量版）
 # --------------------------------------------------------------------------
-def _find_iface(vid: int, usage_page: int, output_len: int = 0):
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
-
-
 def read_mouse() -> tuple[Optional[int], str]:
-    iface = _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02)
-    if iface is None:
-        return None, "没找到接收器"
     try:
-        res = bt.strategy_vendor_protocol(iface)
+        res = g304.read_g304()
     except Exception as e:
         return None, f"读取失败：{e}"
-    if res is None:
-        return None, "没有可用的读取方式"
-    if res.ok:
+    if res.ok and res.level is not None:
         return res.level, ""
-    return None, res.detail or "无回复（动一下鼠标）"
-
-
-def read_headset() -> tuple[Optional[int], str]:
-    return drp.read_battery_only(timeout=0.4)
+    return None, res.error or "没有回复（动一下鼠标）"
 
 
 # --------------------------------------------------------------------------
@@ -303,16 +284,15 @@ class TrayApp:
 
     def _worker(self, hwnd: int) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
+            self.levels["g304"] = read_mouse()
         except Exception:
             self.log("读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
+        level, err = self.levels["g304"]
+        self.log(f"刷新完成：G304={level}（{err or 'ok'}）")
         self.update_icons()
 
     # ---- 打开简洁界面 ---------------------------------------------------
@@ -436,7 +416,7 @@ def main() -> int:
         if tc.is_tray_running():
             # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里两个数字图标就是它；右键图标打开界面）")
+            print("已经在运行了（托盘里那个数字图标就是它；右键图标打开界面）")
             return 0
         # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
         tc.cleanup_zombie()
